@@ -1,0 +1,10 @@
+{
+  "accounts": "accounts.txt",
+  "proxies": "proxies.txt",
+  "output_dir": "check_output",
+  "workers": 8,
+  "verbose": false,
+  "remove_aliases": false,
+  "change_password": false,
+  "ipinfo_key": "replace-with-your-ipinfo-key"
+}

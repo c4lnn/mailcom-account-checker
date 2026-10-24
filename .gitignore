@@ -1,0 +1,10 @@
+__pycache__/
+.agents/
+.codegraph/
+.venv/
+openspec/
+output/
+accounts.txt
+AGENTS.md
+config.json
+proxies.txt

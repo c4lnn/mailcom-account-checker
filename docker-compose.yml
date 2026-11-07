@@ -1,0 +1,32 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.api
+    restart: unless-stopped
+    environment:
+      ACCOUNT_CHECKER_DB: /data/account-checker.sqlite3
+      ACCOUNT_CHECKER_ENCRYPTION_KEY: ${ACCOUNT_CHECKER_ENCRYPTION_KEY:?set ACCOUNT_CHECKER_ENCRYPTION_KEY}
+      CONSOLE_PASSWORD: ${CONSOLE_PASSWORD:?set CONSOLE_PASSWORD}
+      CONSOLE_SESSION_SECRET: ${CONSOLE_SESSION_SECRET:?set CONSOLE_SESSION_SECRET}
+      CONSOLE_COOKIE_SECURE: "${CONSOLE_COOKIE_SECURE:-1}"
+    volumes:
+      - account-data:/data
+    expose:
+      - "8000"
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      API_INTERNAL_URL: http://api:8000
+      NODE_ENV: production
+    depends_on:
+      - api
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+
+volumes:
+  account-data:

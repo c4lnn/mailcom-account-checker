@@ -10,7 +10,7 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import parse_qs, quote, urljoin, urlparse, urlunparse
+from urllib.parse import parse_qs, quote, urljoin, urlparse, urlunparse, urlsplit
 
 from curl_cffi import requests
 from curl_cffi.requests import exceptions as requests_exceptions
@@ -85,10 +85,12 @@ class MailComClient:
         state: dict[str, Any] | None = None,
         timeout: float = 25.0,
         proxy_url: str = "",
+        endpoint_overrides: dict[str, str] | None = None,
     ) -> None:
         self.username = username.strip().lower()
         self.password = password
         self.timeout = timeout
+        self.endpoint_overrides = dict(endpoint_overrides or {})
         # Public code reads may reuse a saved sid/token, but must never turn a
         # traffic burst into password POSTs. Service recovery and explicit
         # account operations leave this enabled.
@@ -192,12 +194,22 @@ class MailComClient:
         but expose only a stable, credential-free ``MailComError`` to callers.
         """
         try:
-            return getattr(self.session, method)(url, **kwargs)
+            return self._send(method, url, **kwargs)
         except requests.RequestsError as exc:
             raise MailComError(
                 "无法连接 mail.com 上游服务",
                 kind=self._transport_error_kind(exc),
             ) from exc
+
+    def _send(self, method: str, url: str, **kwargs: Any) -> Any:
+        parsed = urlparse(url)
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        target = self.endpoint_overrides.get(origin)
+        if target:
+            base = urlsplit(target)
+            url = urlunparse((base.scheme, base.netloc, parsed.path,
+                              parsed.params, parsed.query, parsed.fragment))
+        return getattr(self.session, method)(url, **kwargs)
 
     def _settings_request(
         self,
@@ -291,7 +303,7 @@ class MailComClient:
 
     def _login_once(self) -> None:
         try:
-            page = self.session.get(LOGIN_PAGE_URL, timeout=self.timeout)
+            page = self._send("get", LOGIN_PAGE_URL, timeout=self.timeout)
         except requests.RequestsError as exc:
             raise MailComError(
                 "mail.com login bootstrap request failed",
@@ -329,7 +341,8 @@ class MailComClient:
             "statistics": statistics,
         }
         try:
-            response = self.session.post(
+            response = self._send(
+                "post",
                 LOGIN_URL,
                 data=form,
                 allow_redirects=False,
@@ -360,7 +373,7 @@ class MailComClient:
         query = parsed.query + ("&" if parsed.query else "") + f"tz={self._timezone_hours()}"
         halogin = urlunparse((parsed.scheme, parsed.netloc, "/halogin", "", query, ""))
         try:
-            exchanged = self.session.get(halogin, allow_redirects=False, timeout=self.timeout)
+            exchanged = self._send("get", halogin, allow_redirects=False, timeout=self.timeout)
         except requests.RequestsError as exc:
             raise MailComError(
                 "无法完成 mail.com 会话交换",
@@ -514,7 +527,8 @@ class MailComClient:
         response: Any = None
         for attempt in range(self.oauth_retries):
             try:
-                response = self.session.post(
+                response = self._send(
+                    "post",
                     OAUTH_URL,
                     params={"sid": self.sid},
                     data={"grant_type": "urn:mam:oauth:grant-type:spa", "scope": scope},
@@ -629,7 +643,8 @@ class MailComClient:
             "condition": f"mail.header:subject,to,from,cc:{recipient}",
         }
         try:
-            response = self.session.post(
+            response = self._send(
+                "post",
                 MAIL_LIST_URL, params=params, data=b"", headers=self._mail_headers(token), timeout=self.timeout
             )
         except requests.RequestsError as exc:
@@ -641,7 +656,8 @@ class MailComClient:
             self.tokens.pop(self._token_key(MAIL_CLIENT_ID, MAIL_SCOPE), None)
             token = self.ensure_mail_token()
             try:
-                response = self.session.post(
+                response = self._send(
+                    "post",
                     MAIL_LIST_URL, params=params, data=b"", headers=self._mail_headers(token), timeout=self.timeout
                 )
             except requests.RequestsError as exc:
@@ -726,7 +742,8 @@ class MailComClient:
         for page in range(page_limit):
             params["offset"] = str(page * page_size)
             try:
-                response = self.session.post(
+                response = self._send(
+                    "post",
                     MAIL_LIST_URL,
                     params=params,
                     data=b"",
@@ -871,7 +888,8 @@ class MailComClient:
     def get_quota(self) -> dict[str, Any]:
         token = self.ensure_mail_token()
         try:
-            response = self.session.get(
+            response = self._send(
+                "get",
                 QUOTA_URL,
                 params={"absoluteURI": "false", "no_cache": self.auth_id},
                 headers={**self._mail_headers(token), "Accept": "application/json; charset=utf-8"},
@@ -897,7 +915,8 @@ class MailComClient:
     def get_body(self, mail_id: str) -> str:
         token = self.ensure_mail_token()
         try:
-            response = self.session.get(
+            response = self._send(
+                "get",
                 MAIL_BODY_URL.format(mail_id=mail_id),
                 params={"absoluteURI": "false", "no_cache": self.auth_id},
                 headers={**self._mail_headers(token), "Accept": "text/plain"},
@@ -914,7 +933,7 @@ class MailComClient:
             )
         return response.text
 
-    def change_password(self, new_password: str) -> dict[str, bool]:
+    def change_password(self, new_password: str, *, on_submit=None) -> dict[str, bool]:
         """Change the account password through the navigator SSO + CISS flow.
 
         Reuses ``self.sid`` and ``self.session`` (no second password login).
@@ -967,22 +986,38 @@ class MailComClient:
         post_url = urljoin(str(form.url), html.unescape(action_match.group(1)))
         post_url += "&saveChanges=x" if "?" in post_url else "?saveChanges=x"
 
-        response = self._request(
-            "post",
-            post_url,
-            data={
-                "editPanel:username": self.username,
-                "editPanel:currentPasswordPanel:topWrapper:inputWrapper:input": self.password,
-                "editPanel:newPasswordFieldPanel:topWrapper:inputWrapper:input": new_password,
-                "editPanel:retypeNewPasswordFieldPanel:topWrapper:inputWrapper:input": new_password,
-            },
-            headers={
-                "Origin": "https://account-lxa.mail.com",
-                "Referer": str(form.url),
-            },
-            allow_redirects=False,
-            timeout=self.timeout,
-        )
+        if on_submit is not None:
+            on_submit()
+        try:
+            response = self._request(
+                "post",
+                post_url,
+                data={
+                    "editPanel:username": self.username,
+                    "editPanel:currentPasswordPanel:topWrapper:inputWrapper:input": self.password,
+                    "editPanel:newPasswordFieldPanel:topWrapper:inputWrapper:input": new_password,
+                    "editPanel:retypeNewPasswordFieldPanel:topWrapper:inputWrapper:input": new_password,
+                },
+                headers={
+                    "Origin": "https://account-lxa.mail.com",
+                    "Referer": str(form.url),
+                },
+                allow_redirects=False,
+                timeout=self.timeout,
+            )
+        except MailComError as exc:
+            raise MailComError(
+                "改密码提交结果无法确认",
+                kind="password_change_uncertain",
+                status=exc.status,
+            ) from exc
+
+        if response.status_code == 408 or response.status_code >= 500:
+            raise MailComError(
+                "改密码提交结果无法确认",
+                kind="password_change_uncertain",
+                status=response.status_code,
+            )
 
         if response.status_code in (302, 303):
             location = response.headers.get("Location", "")

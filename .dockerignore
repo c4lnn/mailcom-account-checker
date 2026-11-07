@@ -1,0 +1,13 @@
+.git
+.venv
+.venv-apply
+node_modules
+web/node_modules
+web/.next
+web/.cache
+__pycache__
+.pytest_cache
+tests
+openspec
+output
+data

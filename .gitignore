@@ -1,4 +1,6 @@
 __pycache__/
+node_modules/
+.venv-apply/
 .agents/
 .codegraph/
 .venv/
@@ -8,3 +10,10 @@ accounts.txt
 AGENTS.md
 config.json
 proxies.txt
+web/.next/
+web/.cache/
+web/coverage/
+data/
+.pytest_cache/
+.env
+.test-tmp/

@@ -748,67 +748,52 @@ def _check_imap(
 
 def _change_password_with_retry(
     pair: AccountInput, first_client, client_factory, *, lease: _ProxyLease,
-    progress: _AccountProgress, new_password_factory,
+    progress: _AccountProgress, new_password_factory, password_change_callback=None,
 ) -> dict[str, object]:
-    """改密码：首尝试复用 first_client（不二次登录），失败仅对连接类错误换代理重试。
-
-    服务端明确拒绝（session/bad_credentials 等）立即判失败，避免
-    saveChanges 已生效但响应丢失时用旧密码重试导致误判。
-    """
+    """改密码只提交一次；提交后的通信错误进入待核实，不自动重试。"""
     _line_no, email, password = pair[:3]
     proxy_index = lease.entry[0] if lease.entry else None
-    # 循环外生成一次：重试复用同一新密码，避免每次尝试提交不同密码加重 replay 风险
     new_password = new_password_factory()
+    submitted = False
+    if password_change_callback is not None:
+        password_change_callback("prepared", _line_no, email, new_password, None)
+
+    def mark_submitted() -> None:
+        nonlocal submitted
+        if password_change_callback is not None:
+            password_change_callback("submitted", _line_no, email, new_password, None)
+        submitted = True
 
     def attempt_change(client) -> str:
         progress.report("改密码", "开始", old_password=password, new_password=new_password)
-        client.change_password(new_password)
+        client.change_password(new_password, on_submit=mark_submitted)
         progress.report("改密码", "成功", old_password=password, new_password=new_password)
         return new_password
 
-    def classify(exc: Exception) -> tuple[str, bool]:
-        if isinstance(exc, MailComError):
-            retryable = exc.kind in {"proxy_timeout", "proxy_connect", "network"}
-            return _alias_status(exc), retryable
-        return "alias_error", False
-
     try:
         new_password = attempt_change(first_client)
+        if password_change_callback is not None:
+            password_change_callback("confirmed", _line_no, email, new_password, None)
         return {"ok": True, "status": "password_changed", "new_password": new_password,
                 "proxy_index": proxy_index}
     except Exception as exc:
-        last_error, retryable = classify(exc)
+        uncertain = submitted and (
+            not isinstance(exc, MailComError) or exc.kind == "password_change_uncertain"
+        )
+        last_error = "password_change_uncertain" if uncertain else (
+            _alias_status(exc) if isinstance(exc, MailComError) else "alias_error"
+        )
+        if password_change_callback is not None:
+            password_change_callback("uncertain" if uncertain else "failed", _line_no,
+                                     email, new_password, last_error)
         progress.report("改密码", "失败", error=last_error)
-        if not retryable:
-            return _failed(last_error, proxy_index)
-
-    for attempt in range(2, MAX_ATTEMPTS + 1):
-        if not lease.replace(progress, "改密码重试", last_error):
-            break
-        proxy_index, proxy = lease.entry
-        lease.used_indexes.add(proxy_index)
-        progress.begin_attempt(attempt, proxy_index)
-        client = None
-        try:
-            client = client_factory(email, password, proxy_url=proxy)
-            if hasattr(client, "login_retries"):
-                client.login_retries = 1
-            new_password = attempt_change(client)
-            return {"ok": True, "status": "password_changed", "new_password": new_password,
-                    "proxy_index": proxy_index}
-        except Exception as exc:
-            last_error, retryable = classify(exc)
-            progress.report("改密码", "失败", error=last_error)
-            if not retryable:
-                break
-        finally:
-            _close_web_client(client)
-    return _failed(last_error, proxy_index)
+        return {**_failed(last_error, proxy_index), "status": last_error}
 
 
 def _check_aliases(
     pair: AccountInput, client_factory, *, lease: _ProxyLease, progress: _AccountProgress,
     remove_aliases: bool = False, change_password: bool = False, new_password_factory=None,
+    password_change_callback=None,
 ) -> dict[str, object]:
     _line_no, email, password = pair[:3]
     last_error = "proxy_unavailable"
@@ -816,6 +801,7 @@ def _check_aliases(
     success_client = None
     success_result = None
     for attempt in range(1, MAX_ATTEMPTS + 1):
+        mutations_started = False
         if lease.entry is None:
             progress.report("Web别名检查", "失败", error="proxy_unavailable", reason="无持有代理可开始检查")
             break
@@ -892,33 +878,41 @@ def _check_aliases(
                 elapsed=time.monotonic() - started,
             )
             removed_count = 0
+            delete_error = None
             for address in before_addrs:
+                mutations_started = True
                 try:
                     client.remove_alias(address)
                     removed_count += 1
                     progress.report("别名删除", "成功", address=address)
                 except Exception as exc:
                     last_error = _alias_status(exc) if isinstance(exc, MailComError) else "alias_error"
+                    delete_error = last_error
                     progress.report("别名删除", "失败", error=last_error, elapsed=time.monotonic() - started)
             rows = fetch_rows()
             _after_addrs, active_after, inactive_after = summarize(rows)
             progress.report(
-                "Web别名检查", "成功",
+                "Web别名检查", "失败" if delete_error else "成功",
                 alias_count=active_after + inactive_after,
                 active_alias_count=active_after, inactive_alias_count=inactive_after,
                 removed_count=removed_count, before_count=active_before,
                 elapsed=time.monotonic() - started,
+                **({"error": delete_error} if delete_error else {}),
             )
             success_result = {
-                "ok": True, "status": "ready",
+                "ok": delete_error is None,
+                "status": "ready" if delete_error is None else delete_error,
                 "alias_count": active_after + inactive_after,
                 "active_alias_count": active_after,
                 "inactive_alias_count": inactive_after,
                 "removed_count": removed_count, "before_count": active_before,
                 "proxy_index": proxy_index,
             }
-            success_client = client
-            client = None
+            if delete_error:
+                success_result["error"] = delete_error
+            else:
+                success_client = client
+                client = None
             break
         except Exception as exc:
             last_error = _alias_status(exc) if isinstance(exc, MailComError) else "alias_error"
@@ -928,6 +922,9 @@ def _check_aliases(
                 _close_web_client(client)
             except Exception:
                 pass
+        if mutations_started:
+            progress.report("Web重试", "停止", reason="别名操作结果无法确认，不重放删除", error=last_error)
+            break
         if attempt == MAX_ATTEMPTS:
             progress.report("Web重试", "停止", reason="尝试次数已用完", error=last_error)
             break
@@ -935,15 +932,16 @@ def _check_aliases(
             break
     if success_result is None:
         return _failed(last_error, proxy_index)
-    if change_password and new_password_factory is not None:
+    if success_result.get("ok") and change_password and new_password_factory is not None:
         pwd_result = _change_password_with_retry(
             pair, success_client, client_factory, lease=lease, progress=progress,
             new_password_factory=new_password_factory,
+            password_change_callback=password_change_callback,
         )
         success_result["password_ok"] = bool(pwd_result["ok"])
+        success_result["password_status"] = pwd_result.get("status")
         if pwd_result["ok"]:
             success_result["new_password"] = pwd_result["new_password"]
-            success_result["password_status"] = pwd_result.get("status")
         else:
             success_result["password_error"] = pwd_result.get("error")
         if pwd_result.get("proxy_index") is not None:
@@ -960,6 +958,7 @@ def _check_one(
     check_aliases: bool = False, alias_client_factory=MailComClient,
     remove_aliases: bool = False, change_password: bool = False,
     new_password_factory=generate_new_password,
+    password_change_callback=None,
 ) -> dict[str, object]:
     line_no, email, _password = pair[:3]
     started = time.monotonic()
@@ -980,7 +979,8 @@ def _check_one(
             return result
         alias_result = _check_aliases(pair, alias_client_factory, lease=lease, progress=progress,
                                       remove_aliases=remove_aliases, change_password=change_password,
-                                      new_password_factory=new_password_factory)
+                                      new_password_factory=new_password_factory,
+                                      password_change_callback=password_change_callback)
         if alias_result.get("proxy_index") is not None:
             result["proxy_index"] = alias_result["proxy_index"]
         imap_ok, alias_ok = bool(imap_result.get("ok")), bool(alias_result.get("ok"))
@@ -1031,6 +1031,7 @@ def check_pairs(
     check_aliases: bool = False, alias_client_factory=MailComClient,
     remove_aliases: bool = False, change_password: bool = False,
     new_password_factory=generate_new_password,
+    password_change_callback=None,
     proxy_pool: list[ProxyEntry] | None = None, proxy_choice=_SYSTEM_RANDOM.choice,
     reporter: _ProgressReporter | None = None, transport_probe=None, exit_lookup=None,
     ipinfo_key: str | None = None,
@@ -1039,6 +1040,7 @@ def check_pairs(
         pairs, workers=1, client_factory=client_factory, check_aliases=check_aliases,
         alias_client_factory=alias_client_factory, remove_aliases=remove_aliases,
         change_password=change_password, new_password_factory=new_password_factory,
+        password_change_callback=password_change_callback,
         proxy_pool=proxy_pool, proxy_choice=proxy_choice,
         reporter=reporter, transport_probe=transport_probe, exit_lookup=exit_lookup,
         ipinfo_key=ipinfo_key,
@@ -1050,6 +1052,7 @@ def check_pairs_parallel(
     emit=None, check_aliases: bool = False, alias_client_factory=MailComClient,
     remove_aliases: bool = False, change_password: bool = False,
     new_password_factory=generate_new_password,
+    password_change_callback=None,
     proxy_pool: list[ProxyEntry] | None = None, proxy_choice=_SYSTEM_RANDOM.choice,
     reporter: _ProgressReporter | None = None, transport_probe=None, exit_lookup=None,
     ipinfo_key: str | None = None,
@@ -1101,6 +1104,7 @@ def check_pairs_parallel(
                         check_aliases=check_aliases, alias_client_factory=alias_client_factory,
                         remove_aliases=remove_aliases, change_password=change_password,
                         new_password_factory=new_password_factory,
+                        password_change_callback=password_change_callback,
                     )
                     results.put(result)
                 except Exception:

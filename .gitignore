@@ -16,4 +16,5 @@ web/coverage/
 data/
 .pytest_cache/
 .env
+.env.mocker
 .test-tmp/

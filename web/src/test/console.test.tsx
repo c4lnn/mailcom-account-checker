@@ -22,6 +22,57 @@ describe("控制台路由与交互", () => {
     expect(activeLink).toHaveAttribute("aria-current", "page");
   });
 
+  it("仅在服务端启用 Mocker 时显示导航入口", () => {
+    const view = render(<ConsoleShell><div>内容</div></ConsoleShell>);
+    const navigation = screen.getByRole("navigation", { name: "主导航" });
+    expect(navigation.querySelector('a[href="/mocker"]')).not.toBeInTheDocument();
+    view.rerender(<ConsoleShell mockerEnabled><div>内容</div></ConsoleShell>);
+    expect(navigation.querySelector('a[href="/mocker"]')).toHaveTextContent("Mocker 测试");
+  });
+
+  it("配置随机故障参数并保存到运行时 API", async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "PUT") {
+        const body = JSON.parse(String(init.body));
+        return json({ ...body, scenarios: { success: "正常" }, available_operations: ["login", "imap_select"] });
+      }
+      return json({ mode: "scenario", scenario: "success", operations: ["login"], probability: 0.1,
+        scenarios: { success: "正常" }, available_operations: ["login", "imap_select"] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ConsoleView page="mocker" />);
+    fireEvent.change(await screen.findByLabelText("模式"), { target: { value: "random" } });
+    fireEvent.change(screen.getByLabelText("随机 seed"), { target: { value: "seed-42" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: "imap_select" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存 Mocker 配置" }));
+    expect(await screen.findByText(/新任务会使用该配置/)).toBeInTheDocument();
+    const request = fetchMock.mock.calls.find((call) => call[1]?.method === "PUT");
+    expect(JSON.parse(String(request?.[1]?.body))).toMatchObject({
+      mode: "random", seed: "seed-42", operations: ["login", "imap_select"], probability: 0.1,
+    });
+  });
+
+  it("在任务详情显示固定故障计划并调用服务端重放", async () => {
+    const plan = { version: 1, mode: "random", seed: "seed-42", operations: ["imap_select"], probability: 1,
+      faults: [{ email: "good@example.test", operation: "imap_select", sequence: 2, fault: "503" }] };
+    const detail = { id: "job-1", status: "completed", created_at: "now", completed_count: 1,
+      total_count: 1, success_count: 0, failure_count: 1, results: [], options: { mocker_plan: plan } };
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/accounts?status=pending") return json({ items: [] });
+      if (url === "/api/jobs") return json({ items: [detail] });
+      if (url === "/api/jobs/job-1" && !init?.method) return json(detail);
+      if (url === "/api/jobs/job-1/replay") return json({ id: "job-2", status: "queued" }, 202);
+      return json({ items: [] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ConsoleView page="current-task" />);
+    expect(await screen.findByText(/seed seed-42/)).toBeInTheDocument();
+    expect(screen.getByText(/"sequence": 2/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "按原计划重放" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/jobs/job-1/replay", expect.objectContaining({ method: "POST" })));
+  });
+
   it("展示成功和失败结果分组", () => {
     render(<ResultLists results={[
       { email: "good@example.test", status: "ready", result: { ok: true } },

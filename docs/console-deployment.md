@@ -63,6 +63,45 @@ API 启动时初始化 schema，并将遗留的排队/运行中任务标为中�
 
 Web 本机启动与操作流程见 [Web README](../web/README.md)。代理在独立页面维护为唯一的全局列表，认证信息加密保存；页面只显示配置状态和数量，不回显凭据。任务创建时固定当时的代理列表，后续代理修改只影响新任务。并发、详细日志、删除别名和修改密码均在每次任务中设置；IPinfo 密钥保留在配置页。
 
+## 隔离的手动 Mocker 环境
+
+手动测试环境使用独立 Compose 文件、`.env.mocker`、`mocker-data` 命名卷和 SQLite 文件，不共享生产 `account-data`。只使用预置或导入的 `@example.test` 合成账号；API 会拒绝其他域名。worker 将 HTTP 与 IMAP TLS 目标校验为 loopback，并阻断外部 HTTP、代理、重定向和 socket 出口。该运行模式不是生产任务选项。
+
+在仓库根目录创建本地配置并设置独立密钥：
+
+```powershell
+Copy-Item .env.mocker.example .env.mocker
+$key = & .venv\Scripts\python.exe -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+$session = & .venv\Scripts\python.exe -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+将 `$key`、`$session` 和仅供本机使用的 `CONSOLE_PASSWORD` 写入 `.env.mocker`。该文件已被 Git 忽略；不要复制生产密钥、真实账号或代理。
+
+启动与访问：
+
+```powershell
+docker compose --env-file .env.mocker -f docker-compose.mocker.yml up -d --build
+docker compose --env-file .env.mocker -f docker-compose.mocker.yml ps
+```
+
+默认访问 `http://localhost:3001`。API 不发布主机端口；Web 从 API 的运行时标志显示 Mocker 页面，不依赖另一份前端构建。测试数据库位于独立 `mocker-data` 卷。停止时保留该卷：
+
+```powershell
+docker compose --env-file .env.mocker -f docker-compose.mocker.yml down
+```
+
+控制台预置 `good@example.test` 与 `bad@example.test` 合成记录；成功场景凭据为 `GoodPassword!`，`bad@example.test` 的导入密码故意与 mock 服务密码不符，用于登录失败场景。也可在账号页导入其他 `@example.test` 记录。
+
+在导航的「Mocker 测试」页选择预设场景，或选择随机模式并填写 seed、操作范围及 0 到 1 的故障概率。随机模式中的别名删除和改密仍需在任务页单独启用并确认。任务详情保留场景配置和实际计划，可复制 JSON；终态任务可按原计划重放。相同 seed、账号、操作范围和概率生成稳定计划，计划按账号、操作和序号定位故障。
+
+`worker_interrupted` 会让隔离 worker 进程异常退出，API 将任务标记为中断。`api_restart` 会让专用测试 API 在 worker 进入运行态后以退出码 70 退出；Compose 的 `restart: unless-stopped` 会重启 API，启动恢复将任务标记为中断，用户可刷新页面并创建后续任务。API 手动运行时，需由操作者重新启动进程。两种场景都不会自动重跑邮箱操作；已提交的改密候选会转为待核实。
+
+生产 Compose 不设置 `MAIL_MOCKER_MODE`，因此不显示该导航；直接访问测试页或 Mocker 配置 API 会被拒绝。不要在生产服务设置该变量。测试结束后，如需删除测试数据库，再明确删除隔离卷：
+
+```powershell
+docker compose --env-file .env.mocker -f docker-compose.mocker.yml down -v
+```
+
 ## 日志、结果与异常恢复
 
 Web worker 每产生一条事件就写入 SQLite `job_logs`，每完成一个账号就提交其结果和凭据；当前任务页和日志页通过 SSE 读取持久化事件。Web 任务不向原脚本的 `log.txt` 写入，原 CLI 的文件输出行为保留。日志按原始内容保存和展示，可能包含敏感信息，只允许已登录用户读取。

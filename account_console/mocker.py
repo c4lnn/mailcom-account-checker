@@ -50,6 +50,8 @@ class MockMailState:
         self.accounts = {email.lower(): account for email, account in (accounts or {}).items()}
         self.faults: dict[str, list[str]] = {}
         self.calls: dict[str, int] = {}
+        self.operation_counts: dict[tuple[str, str], int] = {}
+        self.fault_plan: dict[tuple[str, str, int], str] = {}
         self.lock = threading.RLock()
         self.password_change_mode: str | dict[str, str] = "success"
         self.recheck_counts: dict[tuple[str, str], int] = {}
@@ -61,12 +63,25 @@ class MockMailState:
         with self.lock:
             return self.calls.get(operation, 0)
 
-    def record(self, operation: str) -> str | None:
+    def record(self, operation: str, email: str = "") -> str | None:
         with self.lock:
             self.calls[operation] = self.calls.get(operation, 0) + 1
+            key = (email.lower(), operation)
+            sequence = self.operation_counts.get(key, 0) + 1
+            self.operation_counts[key] = sequence
+            planned = self.fault_plan.get((key[0], operation, sequence))
+            if planned is not None:
+                return planned
             queue = self.faults.get(operation)
             return queue.pop(0) if queue else None
 
+    def configure_fault_plan(self, plan: list[dict[str, Any]]) -> None:
+        with self.lock:
+            self.operation_counts.clear()
+            self.fault_plan = {
+                (str(item["email"]).lower(), str(item["operation"]), int(item["sequence"])): str(item["fault"])
+                for item in plan
+            }
 
 class _MockHTTPServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
@@ -114,8 +129,8 @@ class _MockHTTPHandler(http.server.BaseHTTPRequestHandler):
                 return value.lower()
         return ""
 
-    def _fault(self, operation: str) -> bool:
-        fault = self.state.record(operation)
+    def _fault(self, operation: str, email: str | None = None) -> bool:
+        fault = self.state.record(operation, email if email is not None else self._account_email())
         if fault is None:
             return False
         if fault == "drop":
@@ -158,9 +173,9 @@ class _MockHTTPHandler(http.server.BaseHTTPRequestHandler):
             )
             return
         if path == "/mailaccount/primary/emailAddresses":
-            if self._fault("alias_list"):
-                return
             username = self._account_email()
+            if self._fault("alias_list", username):
+                return
             account = self.state.accounts.get(username)
             self._json({"mailaddresslist": account.aliases if account else []})
             return
@@ -170,10 +185,10 @@ class _MockHTTPHandler(http.server.BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         body = self._body()
         if path == "/login":
-            if self._fault("login"):
-                return
             form = parse_qs(body.decode("utf-8", "replace"))
             email = (form.get("username") or [""])[0].strip().lower()
+            if self._fault("login", email):
+                return
             password = (form.get("password") or [""])[0]
             account = self.state.accounts.get(email)
             if email in self.state.rejected_logins or account is None or account.password != password:
@@ -185,7 +200,7 @@ class _MockHTTPHandler(http.server.BaseHTTPRequestHandler):
                 })
             return
         if path == "/navigator/oauth2/token":
-            if self._fault("oauth"):
+            if self._fault("oauth", self._account_email()):
                 return
             payload = base64.urlsafe_b64encode(json.dumps({
                 "exp": int((time.time() + 3600) * 1000), "auth_id": "mock-auth-id",
@@ -193,10 +208,10 @@ class _MockHTTPHandler(http.server.BaseHTTPRequestHandler):
             self._json({"access_token": "mock." + payload + ".signature"})
             return
         if path == "/account/passwordChange":
-            if self._fault("password_change"):
-                return
             form = parse_qs(body.decode("utf-8", "replace"))
             email = (form.get("editPanel:username") or [""])[0].strip().lower()
+            if self._fault("password_change", email):
+                return
             old_password = (form.get("editPanel:currentPasswordPanel:topWrapper:inputWrapper:input") or [""])[0]
             new_password = (form.get("editPanel:newPasswordFieldPanel:topWrapper:inputWrapper:input") or [""])[0]
             account = self.state.accounts.get(email)
@@ -231,9 +246,9 @@ class _MockHTTPHandler(http.server.BaseHTTPRequestHandler):
             self._reply(303, headers={"Location": "/account/settings?passwordChangedSuccessfully=true"})
             return
         if path.startswith("/mailaccount/primary/emailAddressesRemovals/"):
-            if self._fault("alias_remove"):
-                return
             email = self._account_email()
+            if self._fault("alias_remove", email):
+                return
             account = self.state.accounts.get(email)
             address = unquote(path.split("/emailAddressesRemovals/", 1)[1].split("/removals", 1)[0]).lower()
             if account:
@@ -273,7 +288,8 @@ class _MockIMAPHandler(socketserver.StreamRequestHandler):
                 continue
             tag, command = parts[0], parts[1].upper()
             operation = "imap_" + command.lower()
-            fault = self.state.record(operation)
+            email = parts[2].lower() if command == "LOGIN" and len(parts) > 2 else user
+            fault = self.state.record(operation, email)
             if fault == "drop":
                 return
             if fault:

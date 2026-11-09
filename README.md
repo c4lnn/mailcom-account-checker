@@ -61,6 +61,18 @@ npm run build
 
 测试使用本地 mocker 和合成数据，不需要真实邮箱账号。
 
+## 隔离手动 Mocker 测试
+
+除自动化测试外，可用独立 Compose 环境从共享控制台手动测试本地 mail mocker。该环境使用独立数据库，只接受 `@example.test` 合成账号，并在 worker 中强制阻断非 loopback 网络。
+
+```powershell
+Copy-Item .env.mocker.example .env.mocker
+# 在 .env.mocker 中设置独立的加密密钥、会话密钥和本机登录密码
+docker compose --env-file .env.mocker -f docker-compose.mocker.yml up -d --build
+```
+
+默认打开 `http://localhost:3001`。测试环境配置、场景、seed、任务计划重放及停止方式见[控制台部署说明](docs/console-deployment.md#隔离的手动-mocker-环境)。不要使用真实邮箱账号或生产密钥。
+
 ## Python 命令行工具
 
 在仓库根目录复制配置模板，并按需编辑 `config.json`：

@@ -2,7 +2,7 @@
 
 import { FormEvent, ReactNode, useCallback, useEffect, useId, useState } from "react";
 import Link from "next/link";
-import { ArrowRight, RefreshCw, Upload, Play, Save, Search, Eye, EyeOff } from "lucide-react";
+import { ArrowRight, RefreshCw, Upload, Play, Save, Search, Eye, EyeOff, Copy, RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardAction } from "@/components/ui/card";
@@ -17,10 +17,11 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Table, TableHeader, TableBody, TableHead, TableRow, TableCell } from "@/components/ui/table";
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
 
-type Page = "dashboard" | "current-task" | "accounts" | "logs" | "proxies" | "settings";
+type Page = "dashboard" | "current-task" | "accounts" | "logs" | "proxies" | "settings" | "mocker";
 type Account = { id: number; email: string; status: string; error?: string; job_id?: string; created_at?: string };
 type Result = { id?: number; email: string; status: string; result: Record<string, unknown> };
-type Job = { id: string; status: string; created_at: string; completed_count: number; total_count: number; success_count: number; failure_count: number; results?: Result[] };
+type MockerPlan = { version: number; mode: string; scenario?: string; seed?: string; operations?: string[]; probability?: number; faults: { email: string; operation: string; sequence: number; fault: string }[] };
+type Job = { id: string; status: string; created_at: string; completed_count: number; total_count: number; success_count: number; failure_count: number; results?: Result[]; options?: { mocker_config?: { mode?: string; scenario?: string; seed?: string }; mocker_plan?: MockerPlan } };
 type Log = { id: number; payload: Record<string, unknown> };
 type Settings = { ipinfo_key_configured: boolean };
 type Candidate = { id: number; email: string; password: string; status: string; job_id: string; updated_at: string };
@@ -67,7 +68,7 @@ function useLoad<T>(url: string | null) {
 }
 
 function PageTitle({ title, description, action }: { title: string; description: string; action?: ReactNode }) {
-  return <div className="page-title"><div><p className="eyebrow">MAIL ACCOUNT OPERATIONS</p><h1>{title}</h1><p>{description}</p></div>{action}</div>;
+  return <div className="page-title"><div><h1>{title}</h1><p>{description}</p></div>{action}</div>;
 }
 function Panel({ title, description, action, children }: { title: string; description?: string; action?: ReactNode; children: ReactNode }) {
   return <Card><CardHeader><CardTitle>{title}</CardTitle>{description && <CardDescription>{description}</CardDescription>}{action && <CardAction>{action}</CardAction>}</CardHeader><CardContent>{children}</CardContent></Card>;
@@ -180,9 +181,28 @@ function TaskMonitor({ jobId, onJobsChanged }: { jobId: string; onJobsChanged: (
   const reload = job.reload;
   const update = useCallback(() => { void reload(); onJobsChanged(); }, [reload, onJobsChanged]);
   const events = useJobEvents(jobId, update);
+  const [replayError, setReplayError] = useState("");
+  const [replayBusy, setReplayBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+  async function replay() {
+    setReplayBusy(true); setReplayError("");
+    try { await api(`/api/jobs/${jobId}/replay`, { method: "POST" }); onJobsChanged(); }
+    catch (cause) { setReplayError(cause instanceof Error ? cause.message : "重放失败"); }
+    finally { setReplayBusy(false); }
+  }
+  async function copyPlan(plan: MockerPlan) {
+    try { await navigator.clipboard.writeText(JSON.stringify(plan, null, 2)); setCopied(true); }
+    catch { setReplayError("无法访问剪贴板"); }
+  }
+  const plan = job.data?.options?.mocker_plan;
   return <Panel title="任务进度" description={`任务 ${jobId}`} action={job.data ? <Status value={job.data.status} /> : undefined}>
     {job.loading ? <Loading /> : job.error || !job.data ? <ErrorState message={job.error} retry={job.reload} /> : <div className="flex flex-col gap-5">
       <div className="task-stats"><div className="stat-row"><span>进度</span><strong>{job.data.completed_count}/{job.data.total_count}</strong></div><div className="stat-row"><span>成功</span><strong>{job.data.success_count}</strong></div><div className="stat-row"><span>失败</span><strong>{job.data.failure_count}</strong></div></div>
+      {plan && <Panel title="Mocker 故障计划" description={`版本 ${plan.version} · ${plan.mode === "scenario" ? `场景 ${plan.scenario ?? "未知"}` : `seed ${plan.seed ?? "未知"}`} · ${plan.faults.length} 个计划故障`}>
+        <div className="flex flex-wrap gap-2"><Button type="button" variant="outline" size="sm" onClick={() => void copyPlan(plan)}><Copy data-icon="inline-start" />{copied ? "已复制计划" : "复制计划 JSON"}</Button><Button type="button" variant="outline" size="sm" disabled={replayBusy || !["completed", "failed", "interrupted"].includes(job.data.status)} onClick={() => void replay()}><RotateCcw data-icon="inline-start" />{replayBusy ? "正在重放…" : "按原计划重放"}</Button></div>
+        <pre className="mt-3 max-h-72 overflow-auto rounded-md border p-3 text-xs">{JSON.stringify(plan, null, 2)}</pre>
+      </Panel>}
+      <Notice message={replayError} error />
       <ResultLists results={job.data.results ?? []} />
       <div><h3>实时日志 · {events.connection}</h3><LogList logs={events.logs} /></div>
       <CandidatePanel jobId={jobId} live={!!job.data && ["queued", "running"].includes(job.data.status)} />
@@ -348,7 +368,60 @@ function ProxiesView() {
   const state = useLoad<{ configured: boolean; count: number }>("/api/proxies");
   return <div className="flex flex-col gap-5"><PageTitle title="代理" description="维护唯一的全局代理列表，任务创建时固定当前列表。" />{state.loading ? <Loading /> : state.error || !state.data ? <ErrorState message={state.error} retry={state.reload} /> : <ProxyForm initial={state.data} />}</div>;
 }
+
+type MockerConfig = {
+  mode: "scenario" | "random";
+  scenario: string;
+  seed: string;
+  operations: string[];
+  probability: number;
+  scenarios: Record<string, string>;
+  available_operations: string[];
+};
+
+function MockerForm({ initial }: { initial: MockerConfig }) {
+  const [mode, setMode] = useState(initial.mode);
+  const [scenario, setScenario] = useState(initial.scenario);
+  const [seed, setSeed] = useState(initial.seed ?? "");
+  const [operations, setOperations] = useState(initial.operations ?? ["login", "oauth", "imap_select"]);
+  const [probability, setProbability] = useState(initial.probability ?? 0.1);
+  const [feedback, setFeedback] = useState("");
+  const [failure, setFailure] = useState("");
+  const [busy, setBusy] = useState(false);
+  async function save(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); setBusy(true); setFeedback(""); setFailure("");
+    try {
+      const saved = await api<MockerConfig>("/api/mocker/config", {
+        method: "PUT", body: JSON.stringify({ mode, scenario, seed, operations, probability }),
+      });
+      setMode(saved.mode); setScenario(saved.scenario); setSeed(saved.seed ?? "");
+      setOperations(saved.operations ?? []); setProbability(saved.probability ?? 0.1);
+      setFeedback("Mocker 场景配置已保存；新任务会使用该配置生成并保存故障计划。");
+    } catch (cause) { setFailure(cause instanceof Error ? cause.message : "保存失败"); }
+    finally { setBusy(false); }
+  }
+  return <form onSubmit={save} className="max-w-2xl"><FieldGroup>
+    <Panel title="故障模式" description="仅影响隔离的合成账号与本地 mail mocker。预设场景用于确定性验收；随机模式按 seed 生成可重放计划。">
+      <FieldGroup>
+        <Field><FieldLabel htmlFor="mocker-mode">模式</FieldLabel><NativeSelect id="mocker-mode" value={mode} onChange={(event) => setMode(event.target.value as MockerConfig["mode"])}><NativeSelectOption value="scenario">预设场景</NativeSelectOption><NativeSelectOption value="random">随机组合</NativeSelectOption></NativeSelect></Field>
+        {mode === "scenario" ? <Field><FieldLabel htmlFor="mocker-scenario">预设场景</FieldLabel><NativeSelect id="mocker-scenario" value={scenario} onChange={(event) => setScenario(event.target.value)}>{Object.entries(initial.scenarios).map(([id, label]) => <NativeSelectOption key={id} value={id}>{label}</NativeSelectOption>)}</NativeSelect></Field> : <>
+          <Field><FieldLabel htmlFor="mocker-seed">随机 seed</FieldLabel><Input id="mocker-seed" required value={seed} onChange={(event) => setSeed(event.target.value)} /><FieldDescription>相同 seed、账号和参数会生成相同故障计划。</FieldDescription></Field>
+          <Field><FieldLabel htmlFor="mocker-probability">每个操作发生故障的概率</FieldLabel><Input id="mocker-probability" type="number" min={0} max={1} step={0.01} value={probability} onChange={(event) => setProbability(Number(event.target.value))} /></Field>
+          <FieldSet><FieldLegend>纳入随机计划的操作</FieldLegend><FieldGroup>{initial.available_operations.map((operation) => <CheckField key={operation} checked={operations.includes(operation)} onChange={(checked) => setOperations((current) => checked ? [...current, operation] : current.filter((item) => item !== operation))}>{operation}</CheckField>)}</FieldGroup></FieldSet>
+        </>}
+      </FieldGroup>
+    </Panel>
+    <Notice message={failure} error /><Notice message={feedback} />
+    <Button type="submit" disabled={busy || (mode === "random" && (!seed.trim() || !operations.length))}><Save data-icon="inline-start" />{busy ? "正在保存…" : "保存 Mocker 配置"}</Button>
+  </FieldGroup></form>;
+}
+function MockerView() {
+  const state = useLoad<MockerConfig>("/api/mocker/config");
+  return <div className="flex flex-col gap-5"><PageTitle title="Mocker 测试配置" description="配置确定性故障场景或可重放的随机故障计划。" />{state.loading ? <Loading /> : state.error || !state.data ? <ErrorState message={state.error} retry={state.reload} /> : <MockerForm initial={state.data} />}</div>;
+}
+
 export function ConsoleView({ page }: { page: Page }) {
+  if (page === "mocker") return <MockerView />;
   if (page === "dashboard") return <Dashboard />;
   if (page === "current-task") return <CurrentTask />;
   if (page === "accounts") return <Accounts />;

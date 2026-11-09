@@ -1,6 +1,6 @@
 # MailOps 账号检查控制台
 
-使用 Next.js、shadcn/ui 和 Tailwind CSS，提供仪表盘、当前任务、账号、日志、代理和配置六个页面。单用户登录由 FastAPI 验证，浏览器通过 Next.js 同源 `/api/*` 路由访问后端。
+使用 Next.js、shadcn/ui 和 Tailwind CSS，提供仪表盘、当前任务、账号、日志、代理和配置页面；隔离手动测试环境还会按 API 运行时标志显示 Mocker 测试页面。单用户登录由 FastAPI 验证，浏览器通过 Next.js 同源 `/api/*` 路由访问后端。
 
 ## 本机开发
 

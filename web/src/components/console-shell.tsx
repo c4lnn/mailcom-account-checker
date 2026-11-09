@@ -2,11 +2,11 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Activity, LayoutDashboard, ListChecks, LogOut, Network, Settings2, UsersRound } from "lucide-react";
+import { Activity, Bug, LayoutDashboard, ListChecks, LogOut, Network, Settings2, UsersRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-const navigation = [
+const baseNavigation = [
   { href: "/dashboard", label: "仪表盘", icon: LayoutDashboard },
   { href: "/current-task", label: "当前任务", icon: ListChecks },
   { href: "/accounts", label: "账号", icon: UsersRound },
@@ -16,10 +16,10 @@ const navigation = [
 ];
 const titles: Record<string, string> = {
   "/dashboard": "仪表盘", "/current-task": "当前任务", "/accounts": "账号",
-  "/logs": "日志", "/proxies": "代理", "/settings": "配置",
+  "/logs": "日志", "/proxies": "代理", "/settings": "配置", "/mocker": "Mocker 测试",
 };
 
-export function ConsoleShell({ children }: { children: React.ReactNode }) {
+export function ConsoleShell({ children, mockerEnabled = false }: { children: React.ReactNode; mockerEnabled?: boolean }) {
   const pathname = usePathname();
   const router = useRouter();
   async function logout() {
@@ -34,7 +34,7 @@ export function ConsoleShell({ children }: { children: React.ReactNode }) {
       </Link>
       <p className="nav-caption">工作区</p>
       <nav aria-label="主导航" className="nav-list">
-        {navigation.map(({ href, label, icon: Icon }) => {
+        {[...baseNavigation, ...(mockerEnabled ? [{ href: "/mocker", label: "Mocker 测试", icon: Bug }] : [])].map(({ href, label, icon: Icon }) => {
           const active = pathname === href;
           return <Link key={href} href={href} aria-current={active ? "page" : undefined}
             className={cn("nav-link", active && "nav-link-active")}>

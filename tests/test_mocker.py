@@ -1,9 +1,10 @@
+import os
+import time
 from cryptography.fernet import Fernet
 import pytest
 from curl_cffi import requests as curl_requests
 
-from account_console.db import Database
-from account_console.mocker import MockAccount, MockMailService, MockMailState
+from account_console.mocker import MAIL_ORIGINS, MockAccount, MockMailService, MockMailState
 from account_console.security import SecretBox
 from account_console.store import Store
 from account_console.worker import run_job
@@ -463,5 +464,215 @@ def test_api_to_worker_end_to_end_persists_success_failure_and_uncertain_candida
             assert candidates[0]["password"] == service.state.accounts["uncertain@example.test"].password
             assert service.state.count("password_change") == 2
             assert client.get(f"/api/jobs/{job_id}/logs").json()["items"]
+    finally:
+        service.close()
+
+def test_manual_mocker_mode_routes_default_worker_locally_and_seeds_synthetic_accounts(tmp_path, monkeypatch):
+    key = Fernet.generate_key().decode("ascii")
+    monkeypatch.setenv("MAIL_MOCKER_MODE", "1")
+    monkeypatch.setenv("ACCOUNT_CHECKER_DB", str(tmp_path / "manual-mocker.sqlite3"))
+    monkeypatch.setenv("ACCOUNT_CHECKER_ENCRYPTION_KEY", key)
+    monkeypatch.setenv("CONSOLE_COOKIE_SECURE", "0")
+    database = Database(tmp_path / "manual-mocker.sqlite3")
+    app = create_app(database, secrets_box=SecretBox(key),
+                     signer=SessionSigner("m" * 48))
+    with TestClient(app) as client:
+        headers = {"Origin": "http://testserver"}
+        assert client.post("/api/auth/login", json={"password": "console-test-password"},
+                           headers=headers).status_code == 200
+        assert client.get("/api/runtime-config").json() == {"mocker_enabled": True}
+        rows = client.get("/api/accounts?status=pending").json()["items"]
+        assert {row["email"] for row in rows} == {"good@example.test", "bad@example.test"}
+        rejected = client.post("/api/accounts/import", json={
+            "content": "real@example.com----secret\n",
+        }, headers=headers).json()
+        assert rejected == {"imported": 0, "errors": [
+            {"line": 1, "error": "mocker_requires_synthetic_account"},
+        ]}
+        good_id = next(row["id"] for row in rows if row["email"] == "good@example.test")
+        response = client.post("/api/jobs", json={
+            "account_ids": [good_id], "workers": 1, "confirm_mailbox_cleanup": True,
+        }, headers=headers)
+        assert response.status_code == 202, response.text
+        job_id = response.json()["id"]
+        for _ in range(100):
+            job = client.get(f"/api/jobs/{job_id}").json()
+            if job["status"] in {"completed", "failed", "interrupted"}:
+                break
+            time.sleep(0.05)
+        assert job["status"] == "completed", job
+        assert job["results"][0]["result"]["ok"] is True
+
+
+def test_seed_plan_is_stable_and_bound_to_account_operation_sequence():
+    from account_console.mocker_scenarios import build_plan
+
+    config = {
+        "mode": "random", "seed": "seed-42", "operations": ["login", "imap_select"],
+        "probability": 1,
+    }
+    first = build_plan(config, ["B@example.test", "a@example.test", "a@example.test"])
+    second = build_plan(config, ["a@example.test", "B@example.test"])
+    assert first == second
+    assert first["version"] == 1
+    assert {item["email"] for item in first["faults"]} == {"a@example.test", "b@example.test"}
+    assert {item["operation"] for item in first["faults"]} == {"login", "imap_select"}
+    assert {item["sequence"] for item in first["faults"]} == set(range(1, 13))
+
+
+def test_mocker_config_and_job_plan_are_authenticated_persisted_and_replayable(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAIL_MOCKER_MODE", "1")
+    monkeypatch.setenv("CONSOLE_COOKIE_SECURE", "0")
+    database = Database(tmp_path / "mocker-api.sqlite3")
+    box = SecretBox(Fernet.generate_key().decode("ascii"))
+    launched = []
+    app = create_app(database, secrets_box=box, signer=SessionSigner("r" * 48),
+                     launcher=launched.append, mark_orphans_on_start=False)
+    with TestClient(app) as client:
+        headers = {"Origin": "http://testserver"}
+        assert client.get("/api/mocker/config").status_code == 401
+        client.post("/api/auth/login", json={"password": "console-test-password"}, headers=headers)
+        config = {
+            "mode": "scenario", "scenario": "oauth_temporary_failure",
+            "seed": "", "operations": ["login"], "probability": 0.1,
+        }
+        response = client.put("/api/mocker/config", json=config, headers=headers)
+        assert response.status_code == 200
+        assert "oauth_temporary_failure" in response.json()["scenarios"]
+        account = next(row for row in client.get("/api/accounts").json()["items"]
+                       if row["email"] == "good@example.test")
+        created = client.post("/api/jobs", json={
+            "account_ids": [account["id"]], "confirm_mailbox_cleanup": True,
+        }, headers=headers)
+        assert created.status_code == 202
+        job_id = created.json()["id"]
+        saved = client.get(f"/api/jobs/{job_id}").json()
+        plan = saved["options"]["mocker_plan"]
+        assert plan["scenario"] == "oauth_temporary_failure"
+        assert plan["faults"] == [{
+            "email": "good@example.test", "operation": "oauth", "sequence": 1, "fault": "503",
+        }]
+        app.state.store.set_job_status(job_id, "completed")
+        replayed = client.post(f"/api/jobs/{job_id}/replay", headers=headers)
+        assert replayed.status_code == 202
+        replay_id = replayed.json()["id"]
+        assert app.state.store.job_options(replay_id)["mocker_plan"] == plan
+        assert launched == [job_id, replay_id]
+
+        unsupported_id = app.state.store.create_job([account["id"]], {
+            "mocker_config": config, "mocker_plan": {**plan, "version": 999},
+        })
+        app.state.store.set_job_status(unsupported_id, "completed")
+        unsupported = client.post(f"/api/jobs/{unsupported_id}/replay", headers=headers)
+        assert unsupported.status_code == 422
+        assert unsupported.json()["detail"] == "mocker_plan_unavailable"
+
+
+def test_mocker_configuration_api_is_hidden_outside_test_mode(tmp_path, monkeypatch):
+    monkeypatch.delenv("MAIL_MOCKER_MODE", raising=False)
+    app = create_app(
+        Database(tmp_path / "normal-mode.sqlite3"),
+        signer=SessionSigner("n" * 48), launcher=lambda _job_id: None,
+        mark_orphans_on_start=False,
+    )
+    with TestClient(app) as client:
+        headers = {"Origin": "http://testserver"}
+        client.post("/api/auth/login", json={"password": "console-test-password"}, headers=headers)
+        assert client.get("/api/runtime-config").json() == {"mocker_enabled": False}
+        assert client.get("/api/mocker/config").status_code == 404
+        assert client.put("/api/mocker/config", json={"scenario": "success"}, headers=headers).status_code == 404
+
+
+def test_worker_interruption_is_test_only_and_marks_the_job_interrupted(tmp_path, monkeypatch):
+    key = Fernet.generate_key().decode("ascii")
+    db_path = tmp_path / "worker-interruption.sqlite3"
+    monkeypatch.setenv("MAIL_MOCKER_MODE", "1")
+    monkeypatch.setenv("ACCOUNT_CHECKER_DB", str(db_path))
+    monkeypatch.setenv("ACCOUNT_CHECKER_ENCRYPTION_KEY", key)
+    monkeypatch.setenv("CONSOLE_COOKIE_SECURE", "0")
+    app = create_app(Database(db_path), secrets_box=SecretBox(key),
+                     signer=SessionSigner("i" * 48), mark_orphans_on_start=False)
+    with TestClient(app) as client:
+        headers = {"Origin": "http://testserver"}
+        client.post("/api/auth/login", json={"password": "console-test-password"}, headers=headers)
+        account = next(row for row in client.get("/api/accounts").json()["items"]
+                       if row["email"] == "good@example.test")
+        configured = client.put("/api/mocker/config", json={
+            "mode": "scenario", "scenario": "worker_interrupted",
+        }, headers=headers)
+        assert configured.status_code == 200
+        response = client.post("/api/jobs", json={
+            "account_ids": [account["id"]], "confirm_mailbox_cleanup": True,
+        }, headers=headers)
+        assert response.status_code == 202
+        job_id = response.json()["id"]
+        for _ in range(200):
+            job = client.get(f"/api/jobs/{job_id}").json()
+            if job["status"] == "interrupted":
+                break
+            time.sleep(0.05)
+        assert job["status"] == "interrupted", job
+        assert job["options"]["mocker_plan"]["lifecycle"] == "worker_interrupt"
+
+
+def test_worker_network_guard_blocks_http_proxy_redirect_dns_and_sockets(block_nonlocal_network):
+    import socket
+    from account_console.worker import _install_local_network_guard
+
+    original_connect = socket.socket.connect
+    original_connect_ex = socket.socket.connect_ex
+    original_getaddrinfo = socket.getaddrinfo
+    original_request = curl_requests.Session.request
+    session = curl_requests.Session()
+    class RedirectResponse:
+        status_code = 302
+        headers = {"Location": "https://example.com/redirected"}
+
+    curl_requests.Session.request = lambda *_args, **_kwargs: RedirectResponse()
+    try:
+        _install_local_network_guard()
+        with pytest.raises(RuntimeError, match="mocker_network_egress_blocked"):
+            session.get("http://127.0.0.1:1/start")
+        with pytest.raises(RuntimeError, match="mocker_network_egress_blocked"):
+            session.get("https://example.com")
+        with pytest.raises(RuntimeError, match="mocker_network_egress_blocked"):
+            session.get("http://127.0.0.1:1", proxies={"http": "http://example.com:8080"})
+        with pytest.raises(RuntimeError, match="mocker_network_egress_blocked"):
+            socket.create_connection(("203.0.113.10", 993), timeout=0.1)
+        with pytest.raises(RuntimeError, match="mocker_network_egress_blocked"):
+            socket.create_connection(("example.com", 443), timeout=0.1)
+        with socket.socket() as connection:
+            with pytest.raises(RuntimeError, match="mocker_network_egress_blocked"):
+                connection.connect(("203.0.113.10", 993))
+        assert not block_nonlocal_network
+    finally:
+        socket.socket.connect = original_connect
+        socket.socket.connect_ex = original_connect_ex
+        socket.getaddrinfo = original_getaddrinfo
+        curl_requests.Session.request = original_request
+        session.close()
+
+
+@pytest.mark.parametrize(("target", "expected_error"), [
+    ({}, "mocker_configuration_missing"),
+    ({origin: "https://mail.com" for origin in MAIL_ORIGINS},
+     "mocker_target_not_local"),
+])
+def test_worker_rejects_missing_or_nonlocal_mocker_targets_before_network(
+        tmp_path, monkeypatch, target, expected_error):
+    service, store, box, job_id = _job(tmp_path)
+    monkeypatch.setenv("MAIL_MOCKER_MODE", "1")
+    monkeypatch.setenv("MAIL_MOCKER_IMAP_HOST", "127.0.0.1")
+    monkeypatch.setenv("MAIL_MOCKER_IMAP_PORT", str(service.imap_port))
+    monkeypatch.setenv("MAIL_MOCKER_CERT", str(service._server_certificate))
+    monkeypatch.delenv("MAIL_API_ENDPOINT_OVERRIDES", raising=False)
+    try:
+        with pytest.raises(RuntimeError, match=expected_error):
+            run_job(job_id, database=store.db, secrets_box=box, endpoint_overrides=target)
+        job = store.get_job(job_id)
+        assert job["status"] == "failed"
+        assert job["error"] == expected_error
+        assert any(event["payload"].get("error") == expected_error
+                   for event in store.read_logs(job_id))
     finally:
         service.close()

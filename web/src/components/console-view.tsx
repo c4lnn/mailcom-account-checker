@@ -22,9 +22,68 @@ type Account = { id: number; email: string; status: string; error?: string; job_
 type Result = { id?: number; email: string; status: string; result: Record<string, unknown> };
 type MockerPlan = { version: number; mode: string; scenario?: string; seed?: string; operations?: string[]; probability?: number; faults: { email: string; operation: string; sequence: number; fault: string }[] };
 type Job = { id: string; status: string; created_at: string; completed_count: number; total_count: number; success_count: number; failure_count: number; results?: Result[]; options?: { mocker_config?: { mode?: string; scenario?: string; seed?: string }; mocker_plan?: MockerPlan } };
-type Log = { id: number; payload: Record<string, unknown> };
+type Log = { id: number; created_at: string; verbose: boolean; payload: Record<string, unknown> };
 type Settings = { ipinfo_key_configured: boolean };
 type Candidate = { id: number; email: string; password: string; status: string; job_id: string; updated_at: string };
+
+const logFieldLabels: Array<[string, string]> = [
+  ["attempt", "attempt"], ["proxy", "proxy"], ["operation", "操作"],
+  ["status", "状态"], ["count", "邮件数"], ["error", "错误"], ["reason", "原因"],
+  ["next_proxy", "下一代理"], ["alias_count", "别名数"], ["active_alias_count", "ACTIVE别名"],
+  ["inactive_alias_count", "非ACTIVE别名"], ["address", "别名"], ["result", "结果"],
+  ["failure_stage", "失败阶段"], ["failure_folder", "失败文件夹"],
+  ["failure_operation", "失败操作"], ["before", "初始"], ["after", "剩余"],
+  ["action", "处理"], ["ip", "IP"], ["country_code", "国家代码"],
+  ["country_name", "国家"], ["provider", "提供方"], ["fallback_count", "备用次数"],
+  ["old_password", "旧密码"], ["new_password", "新密码"],
+];
+const knownLogErrors: Record<string, true> = {
+  bad_credentials: true, login_challenged: true, rate_limited: true, proxy_error: true, network_error: true,
+  imap_login_error: true, imap_error: true, alias_error: true, imap_clear_failed: true, imap_timeout: true,
+  imap_network: true, imap_protocol: true, imap_auth_failed: true, imap_tls: true, proxy_required: true,
+  proxy_invalid: true, proxy_auth: true, proxy_connect: true, proxy_timeout: true, proxy_unavailable: true,
+  geo_timeout: true, geo_http: true, geo_invalid: true, geo_too_large: true, geo_network: true, geo_unavailable: true,
+};
+
+function logText(value: unknown): string {
+  const text = typeof value === "boolean" ? (value ? "True" : "False") : String(value);
+  return Array.from(text, (character) => {
+    if (character === " " || !/[\p{C}\p{Z}]/u.test(character)) return character;
+    const code = character.codePointAt(0)!;
+    const escapes: Record<number, string> = { 8: "\\b", 9: "\\t", 10: "\\n", 12: "\\f", 13: "\\r" };
+    if (escapes[code]) return escapes[code];
+    const width = code <= 0xff ? 2 : code <= 0xffff ? 4 : 8;
+    const marker = width === 2 ? "x" : width === 4 ? "u" : "U";
+    return `\\${marker}${code.toString(16).padStart(width, "0")}`;
+  }).join("");
+}
+
+function formatLogLine(log: Log): string {
+  const event = log.payload;
+  const stage = String(event.stage ?? "");
+  const worker = event.worker;
+  const email = event.email;
+  let prefix = `[${logText(log.created_at)}] `;
+  if (worker !== undefined && worker !== null) prefix += `[worker#${logText(worker)}]`;
+  if (email !== undefined && email !== null) prefix += `[${logText(email)}]`;
+  prefix += `[${logText(stage)}]`;
+  if (event.folder) prefix += `[${logText(event.folder)}]`;
+
+  const fields: string[] = [];
+  for (const [key, label] of logFieldLabels) {
+    if (key === "proxy" && stage !== "代理检测") continue;
+    if (!log.verbose && key === "attempt"
+      && stage !== "账号检查" && stage !== "代理检测" && !stage.includes("重试")
+      && event.status !== "失败") continue;
+    if (!(key in event) || event[key] === null || event[key] === undefined) continue;
+    let value = event[key];
+    if (key === "attempt") value = `${value}/3`;
+    else if (key === "error" && !knownLogErrors[String(value)]) value = "unknown_error";
+    const fieldLabel = key === "count" && stage === "复查" ? "剩余" : label;
+    fields.push(`${fieldLabel}=${logText(value)}`);
+  }
+  return prefix + (fields.length ? ` ${fields.join(" ")}` : "");
+}
 
 const labels: Record<string, string> = {
   queued: "排队中", running: "运行中", completed: "已完成", failed: "失败", interrupted: "已中断",
@@ -160,8 +219,9 @@ function useJobEvents(jobId: string | null, onUpdate?: () => void) {
       const id = Number(event.lastEventId);
       if (id <= cursor) return;
       cursor = id;
-      const payload = JSON.parse(event.data) as Record<string, unknown>;
-      setState((current) => ({ jobId, logs: current.jobId === jobId ? [...current.logs, { id, payload }] : [{ id, payload }] }));
+      const item = JSON.parse(event.data) as Log;
+      const log = { ...item, id };
+      setState((current) => ({ jobId, logs: current.jobId === jobId ? [...current.logs, log] : [log] }));
       if (onUpdate && !timer) timer = setTimeout(() => { timer = undefined; if (!closed) onUpdate(); }, 250);
     };
     source.onerror = () => { setConnection(source.readyState === EventSource.CLOSED ? "连接已关闭" : "连接中断，正在重连"); };
@@ -224,7 +284,7 @@ export function ResultLists({ results }: { results: Result[] }) {
   })}</div>;
 }
 function LogList({ logs }: { logs: Log[] }) {
-  return logs.length ? <div className="log-list" aria-live="polite">{logs.map((log) => <pre key={log.id}>#{log.id} {JSON.stringify(log.payload)}</pre>)}</div> : <EmptyState>等待任务事件</EmptyState>;
+  return logs.length ? <div className="log-list" aria-live="polite">{logs.map((log) => <pre key={log.id}>{formatLogLine(log)}</pre>)}</div> : <EmptyState>等待任务事件</EmptyState>;
 }
 
 function CandidatePanel({ jobId, live = false }: { jobId?: string; live?: boolean }) {
@@ -291,7 +351,7 @@ function Logs() {
   const jobs = useLoad<{ items: Job[] }>("/api/jobs");
   const [selection, setSelection] = useState("");
   const selected = selection || jobs.data?.items[0]?.id || "";
-  return <div className="flex flex-col gap-5"><PageTitle title="日志" description="按原始内容查看持久化任务事件。断线后会从事件游标继续接收。" />
+  return <div className="flex flex-col gap-5"><PageTitle title="日志" description="按 `check_and_clean_accounts.py` 的行式格式查看持久化任务事件。断线后会从事件游标继续接收。" />
     <Panel title="任务日志" action={<Button variant="outline" size="sm" onClick={() => void jobs.reload()}><RefreshCw data-icon="inline-start" />刷新</Button>}>
       <FieldGroup><Field><FieldLabel htmlFor="job-select">任务记录</FieldLabel><NativeSelect id="job-select" className="max-w-xl" value={selected} onChange={(event) => setSelection(event.target.value)}><NativeSelectOption value="">选择任务</NativeSelectOption>{jobs.data?.items.map((job) => <NativeSelectOption key={job.id} value={job.id}>{job.created_at} · {labels[job.status] ?? job.status} · {job.id.slice(0, 8)}</NativeSelectOption>)}</NativeSelect></Field>
         {jobs.loading ? <Loading /> : jobs.error ? <ErrorState message={jobs.error} retry={jobs.reload} /> : selected ? <JobLogs key={selected} jobId={selected} /> : <EmptyState>尚无任务日志</EmptyState>}

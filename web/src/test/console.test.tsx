@@ -226,18 +226,54 @@ describe("控制台路由与交互", () => {
     expect(body).not.toHaveProperty("proxies");
   });
 
-  it("实时日志保留原始值、去重并在结束时关闭连接", async () => {
+  it("实时与历史日志按旧版格式显示、去重并保留原始值", async () => {
     vi.stubGlobal("fetch", vi.fn(() => json({ items: [{ id: "log-job", status: "running" }] })));
     render(<ConsoleView page="logs" />);
     await screen.findByRole("option", { name: /log-job/ });
     const source = MockEventSource.instances.at(-1)!;
     expect(source.url).toBe("/api/jobs/log-job/events");
-    act(() => { source.receive(1, { password: "RawPassword!" }); source.receive(1, { password: "RawPassword!" }); source.onerror?.(); });
-    expect(screen.getAllByText(/RawPassword!/)).toHaveLength(1);
+    const first = { id: 1, created_at: "2026-01-02 03:04:05.678", verbose: true, payload: {
+      worker: 2, email: "one@example.test", stage: "账号检查", folder: "INBOX", attempt: 2,
+      proxy_index: 3, status: "成功", new_password: "RawPassword!", unknown: "hidden",
+    } };
+    act(() => { source.receive(1, first); source.receive(1, first); source.onerror?.(); });
+    expect(screen.getAllByText("[2026-01-02 03:04:05.678] [worker#2][one@example.test][账号检查][INBOX] attempt=2/3 状态=成功 新密码=RawPassword!")).toHaveLength(1);
     expect(screen.getByText("连接中断，正在重连")).toBeInTheDocument();
-    act(() => { source.receive(2, { stage: "结束" }); source.complete(); });
+    const proxy = "http://user:secret@proxy.example.test:8080";
+    act(() => source.receive(2, { id: 2, created_at: "2026-01-02 03:04:05.900", verbose: false,
+      payload: { stage: "代理检测", status: "开始", proxy, proxy_index: 3 } }));
+    expect(screen.getByText(`[2026-01-02 03:04:05.900] [代理检测] proxy=${proxy} 状态=开始`)).toBeInTheDocument();
+    const second = { id: 3, created_at: "2026-01-02 03:04:06", verbose: false, payload: {
+      stage: "任务", status: "完成", attempt: 1, proxy_index: 3, error: "unlisted_error",
+      reason: "line\nnext", unknown: "hidden",
+    } };
+    act(() => { source.receive(3, second); source.complete(); });
+    expect(screen.getByText("[2026-01-02 03:04:06] [任务] 状态=完成 错误=unknown_error 原因=line\\nnext")).toBeInTheDocument();
     expect(screen.getByText("任务已结束")).toBeInTheDocument();
     expect(source.readyState).toBe(MockEventSource.CLOSED);
+  });
+
+  it("实时任务日志仅在代理检测阶段显示未脱敏代理 URL", async () => {
+    const job = { id: "live-job", status: "running", created_at: "2026-01-02 03:04:05",
+      completed_count: 0, total_count: 1, success_count: 0, failure_count: 0, results: [], options: {} };
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/jobs") return json({ items: [job] });
+      if (url === "/api/accounts?status=pending") return json({ items: [] });
+      if (url === "/api/jobs/live-job") return json(job);
+      return json({ items: [] });
+    }));
+    const previousSources = MockEventSource.instances.length;
+    render(<ConsoleView page="current-task" />);
+    await screen.findByText("改密候选查询");
+    const source = MockEventSource.instances.slice(previousSources).find((item) => item.url === "/api/jobs/live-job/events")!;
+    const proxy = "https://user:secret@proxy.example.test:8443";
+    act(() => source.receive(1, { id: 1, created_at: "2026-01-02 03:04:06", verbose: false,
+      payload: { stage: "代理检测", status: "开始", proxy, proxy_index: 4 } }));
+    expect(await screen.findByText(`[2026-01-02 03:04:06] [代理检测] proxy=${proxy} 状态=开始`)).toBeInTheDocument();
+    act(() => source.receive(2, { id: 2, created_at: "2026-01-02 03:04:07", verbose: false,
+      payload: { stage: "账号检查", status: "成功", proxy, proxy_index: 4 } }));
+    expect(await screen.findByText("[2026-01-02 03:04:07] [账号检查] 状态=成功")).toBeInTheDocument();
   });
 
   it("按邮箱查询候选并显式确认后刷新状态", async () => {

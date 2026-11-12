@@ -512,9 +512,10 @@ def create_app(
     def events(job_id: str, request: Request, after_id: int = 0,
                _user: str = Depends(require_user)):
         try:
-            store.get_job(job_id)
+            job = store.get_job(job_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="job_not_found") from exc
+        verbose = bool(job["options"].get("verbose"))
 
         try:
             header_cursor = int(request.headers.get("last-event-id", "0") or 0)
@@ -529,7 +530,7 @@ def create_app(
                 items = store.read_logs(job_id, after_id=cursor, limit=250)
                 for item in items:
                     cursor = item["id"]
-                    yield f"id: {cursor}\ndata: {json.dumps(item['payload'], ensure_ascii=False)}\n\n"
+                    yield f"id: {cursor}\ndata: {json.dumps({**item, 'verbose': verbose}, ensure_ascii=False)}\n\n"
                 state = store.get_job(job_id)
                 if state["status"] in {"completed", "failed", "interrupted"}:
                     # 状态变成终态前可能又写入了日志，确认游标之后确实为空再结束。

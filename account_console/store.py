@@ -89,10 +89,12 @@ class Store:
         return json.loads(self.secrets.decrypt(row[0]))
 
     def append_log(self, job_id: str, payload: dict[str, Any]) -> int:
+        created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         with self.db.transaction() as connection:
             cursor = connection.execute(
-                "INSERT INTO job_logs(job_id,payload_json) VALUES (?,?)",
-                (job_id, json.dumps(payload, ensure_ascii=False, separators=(",", ":"))),
+                "INSERT INTO job_logs(job_id,payload_json,created_at) VALUES (?,?,?)",
+                (job_id, json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                 created_at),
             )
             return int(cursor.lastrowid)
 

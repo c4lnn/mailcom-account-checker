@@ -1,3 +1,4 @@
+import json
 import os
 
 from cryptography.fernet import Fernet
@@ -214,7 +215,51 @@ def test_job_requires_global_proxy_configuration(tmp_path):
         assert response.status_code == 422
         assert response.json()["detail"] == "proxy_file_empty"
         assert app.state.store.list_jobs() == []
-def test_sse_replays_only_events_after_last_event_id(tmp_path):
+def test_sse_replays_only_events_after_last_event_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONSOLE_PASSWORD", "console-test-password")
+    monkeypatch.setenv("CONSOLE_COOKIE_SECURE", "0")
+    app, _box = make_app(tmp_path)
+    with TestClient(app) as client:
+        client.post("/api/auth/login", json={"password": "console-test-password"},
+                    headers={"Origin": "http://testserver"})
+        store = app.state.store
+        store.import_accounts([("events@example.com", "pw")])
+        with store.db.connect() as connection:
+            account_id = connection.execute(
+                "SELECT id FROM imported_accounts"
+            ).fetchone()[0]
+        job_id = store.create_job([account_id], {"workers": 1, "verbose": True})
+        store.append_log(job_id, {"stage": "first", "status": "ok"})
+        second_id = store.append_log(job_id, {"stage": "second", "status": "ok"})
+        store.set_job_status(job_id, "completed")
+
+        response = client.get(
+            f"/api/jobs/{job_id}/events", headers={"Last-Event-ID": "1"}
+        )
+        assert response.status_code == 200
+        second_event = next(
+            block for block in response.text.split("\n\n")
+            if block.startswith(f"id: {second_id}\n")
+        )
+        event_data = json.loads(next(
+            line.removeprefix("data: ") for line in second_event.splitlines()
+            if line.startswith("data: ")
+        ))
+        assert event_data["id"] == second_id
+        assert event_data["payload"] == {"stage": "second", "status": "ok"}
+        assert event_data["verbose"] is True
+        assert len(event_data["created_at"].rsplit(".", 1)[1]) == 3
+        log_items = client.get(f"/api/jobs/{job_id}/logs").json()["items"]
+        assert log_items[-1] == {
+            "id": second_id,
+            "payload": {"stage": "second", "status": "ok"},
+            "created_at": event_data["created_at"],
+        }
+        assert "first" not in response.text
+        assert "event: complete" in response.text
+
+
+def test_job_log_timestamp_preserves_milliseconds_and_legacy_precision(tmp_path):
     app, _box = make_app(tmp_path)
     with TestClient(app) as client:
         client.post("/api/auth/login", json={"password": "console-test-password"},
@@ -226,19 +271,18 @@ def test_sse_replays_only_events_after_last_event_id(tmp_path):
                 "SELECT id FROM imported_accounts"
             ).fetchone()[0]
         job_id = store.create_job([account_id], {"workers": 1})
-        store.append_log(job_id, {"stage": "first", "status": "ok"})
-        second_id = store.append_log(job_id, {"stage": "second", "status": "ok"})
-        store.set_job_status(job_id, "completed")
-
-        response = client.get(
-            f"/api/jobs/{job_id}/events", headers={"Last-Event-ID": "1"}
-        )
-        assert response.status_code == 200
-        assert "id: " + str(second_id) in response.text
-        assert '"stage": "second"' in response.text
-        assert '"stage": "first"' not in response.text
-        assert "event: complete" in response.text
-
+        new_id = store.append_log(job_id, {"stage": "new"})
+        with store.db.connect() as connection:
+            connection.execute(
+                "INSERT INTO job_logs(job_id,payload_json) VALUES (?,?)",
+                (job_id, '{"stage":"legacy"}'),
+            )
+        logs = store.read_logs(job_id)
+        assert logs[0]["id"] == new_id
+        assert len(logs[0]["created_at"].rsplit(".", 1)[1]) == 3
+        assert logs[0]["payload"] == {"stage": "new"}
+        assert len(logs[1]["created_at"]) == 19
+        assert logs[1]["payload"] == {"stage": "legacy"}
 
 def test_blank_ipinfo_key_keeps_existing_secret(tmp_path):
     app, _box = make_app(tmp_path)

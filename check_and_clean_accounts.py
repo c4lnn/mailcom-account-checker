@@ -85,7 +85,7 @@ class _ProgressReporter:
             prefix += f"[{_log_text(event['folder'])}]"
         fields: list[str] = []
         labels = {
-            "attempt": "attempt", "proxy_index": "proxy", "operation": "操作",
+            "attempt": "attempt", "proxy": "proxy", "operation": "操作",
             "status": "状态", "count": "邮件数",
             "error": "错误", "reason": "原因", "next_proxy": "下一代理",
             "alias_count": "别名数", "active_alias_count": "ACTIVE别名",
@@ -97,7 +97,9 @@ class _ProgressReporter:
             "old_password": "旧密码", "new_password": "新密码",
         }
         for key, label in labels.items():
-            if (not self.verbose and key in {"attempt", "proxy_index"}
+            if key == "proxy" and event["stage"] != "代理检测":
+                continue
+            if (not self.verbose and key == "attempt"
                     and event["stage"] not in {"账号检查", "代理检测"} and "重试" not in event["stage"]
                     and event.get("status") != "失败"):
                 continue
@@ -469,7 +471,7 @@ class _ProbeProgress:
 
     def check(self, entry, transport_probe, exit_lookup) -> bool:
         index, proxy = entry
-        fields = {"proxy_index": index}
+        fields = {"proxy_index": index, "proxy": proxy}
         started = time.monotonic()
         self.report("代理检测", "开始", **fields)
         if self.reporter.verbose:

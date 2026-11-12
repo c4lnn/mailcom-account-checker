@@ -121,7 +121,7 @@ describe("控制台路由与交互", () => {
     fireEvent.click(await screen.findByRole("checkbox", { name: /one@example.test/ }));
     expect(screen.queryByLabelText("代理列表")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "开始任务" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("请逐项确认所有启用的邮箱操作");
+    expect(await screen.findByRole("alert")).toHaveTextContent("请确认清空邮箱文件夹");
     await waitFor(() => expect(fetchMock.mock.calls.some((call) => call[1]?.method === "POST")).toBe(false));
   });
 
@@ -187,7 +187,7 @@ describe("控制台路由与交互", () => {
     expect(screen.queryByDisplayValue(/proxy-secret/)).not.toBeInTheDocument();
   });
 
-  it("仅在任务页配置本次选项且逐项确认后提交", async () => {
+  it("任务选项顺序明确且可选修改只需启用对应开关", async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       if (init?.method === "POST") return json({ id: "created-job" }, 202);
       if (String(input).includes("status=pending")) return json({ items: [{ id: 8, email: "selected@example.test" }] });
@@ -197,22 +197,32 @@ describe("控制台路由与交互", () => {
     render(<ConsoleView page="current-task" />);
     fireEvent.click(await screen.findByRole("checkbox", { name: /selected@example.test/ }));
     fireEvent.change(screen.getByLabelText("并发数"), { target: { value: "2" } });
-    fireEvent.click(screen.getByRole("checkbox", { name: "详细进度日志" }));
-    fireEvent.click(screen.getByRole("checkbox", { name: /我确认清空/ }));
-    fireEvent.click(screen.getByRole("checkbox", { name: "删除邮箱别名" }));
-    fireEvent.click(screen.getByRole("checkbox", { name: "自动修改密码" }));
+
+    const verbose = screen.getByRole("checkbox", { name: "详细进度日志" });
+    const clear = screen.getByRole("checkbox", { name: /我确认清空/ });
+    const remove = screen.getByRole("checkbox", { name: /删除邮箱别名/ });
+    const change = screen.getByRole("checkbox", { name: /自动修改密码/ });
+    expect(verbose.compareDocumentPosition(clear) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(clear.compareDocumentPosition(remove) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(remove.compareDocumentPosition(change) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(remove).toHaveAccessibleName(/会删除所选账号的别名/);
+    expect(change).toHaveAccessibleName(/会更改所选账号密码，并留存候选密码/);
+
+    fireEvent.click(remove);
+    fireEvent.click(change);
     fireEvent.click(screen.getByRole("button", { name: "开始任务" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("请逐项确认");
+    expect(await screen.findByRole("alert")).toHaveTextContent("请确认清空邮箱文件夹");
     expect(fetchMock.mock.calls.filter((call) => call[1]?.method === "POST")).toHaveLength(0);
-    fireEvent.click(screen.getByRole("checkbox", { name: "我确认删除所选账号的别名" }));
-    fireEvent.click(screen.getByRole("checkbox", { name: /我确认修改所选账号密码/ }));
+
+    fireEvent.click(clear);
     fireEvent.click(screen.getByRole("button", { name: "开始任务" }));
     expect(await screen.findByText(/已加入队列/)).toBeInTheDocument();
     const request = fetchMock.mock.calls.find((call) => call[1]?.method === "POST")!;
     const body = JSON.parse(String(request[1]?.body));
-    expect(body).toMatchObject({ account_ids: [8], workers: 2, verbose: true,
-      remove_aliases: true, change_password: true, confirm_mailbox_cleanup: true,
-      confirm_remove_aliases: true, confirm_change_password: true });
+    expect(body).toMatchObject({ account_ids: [8], workers: 2, verbose: false,
+      remove_aliases: true, change_password: true, confirm_mailbox_cleanup: true });
+    expect(body).not.toHaveProperty("confirm_remove_aliases");
+    expect(body).not.toHaveProperty("confirm_change_password");
     expect(body).not.toHaveProperty("proxies");
   });
 

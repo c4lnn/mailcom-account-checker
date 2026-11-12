@@ -92,6 +92,6 @@ Copy-Item config.example.json config.json
 
 ## 重要操作说明
 
-检查任务会清空所选邮箱的 `Drafts`、`INBOX`、`OUTBOX`、`Sent`、`Spam` 和 `Trash` 文件夹。删除别名和修改密码也会对邮箱产生实际影响；启动任务前请确认账号选择及对应操作。不要使用真实邮箱账号运行 mocker 测试。
+检查任务会清空所选邮箱的 `Drafts`、`INBOX`、`OUTBOX`、`Sent`、`Spam` 和 `Trash` 文件夹，启动前必须明确确认。删除别名和修改密码默认关闭；勾选对应任务选项即授权该操作，并会对邮箱产生实际影响。不要使用真实邮箱账号运行 mocker 测试。
 
 日志按原始内容保存，可能包含敏感信息。数据库凭据使用 `ACCOUNT_CHECKER_ENCRYPTION_KEY` 加密；请妥善备份数据库和原密钥。丢失加密密钥将无法解密已保存的凭据。不要提交 `.env`、`config.json`、账号文件、代理文件或运行输出。

@@ -57,7 +57,7 @@ flowchart TD
 | 配置 | 配置文件读取失败为 `config_file_error`；JSON 或字段校验失败为 `config_error` | 在账号处理前停止，退出码 `2` |
 | 账号/代理输入 | 读取失败为 `input_file_error`；格式错误可为 `account_format`、`proxy_format`，空代理池为 `proxy_file_empty`，其他输入校验错误为 `input_error` | 在账号处理前停止，退出码 `2` |
 | 代理预检/派发 | 先验证代理到 IMAP 的 CONNECT/TLS 传输，不在预检中发送账号 `LOGIN`。代理候选失败后不再使用；候选耗尽时停止新派发，在途账号继续收尾，未派发账号得到 `proxy_unavailable` | 账号级失败会进入错误结果；可能使最终退出码为 `1` |
-| IMAP 探活 | 开始清箱前的连接、登录或 IMAP 探活失败可在最多 `MAX_ATTEMPTS` 次尝试内更换预检代理；错误映射包括 `bad_credentials`、`login_challenged`、`rate_limited`、`proxy_error`、`network_error`、`imap_login_error`、`imap_error` | 尝试耗尽或无新代理时形成账号失败 |
+| IMAP 探活 | 开始清箱前的连接、登录或 IMAP 探活失败可在最多 `MAX_ATTEMPTS` 次尝试内更换预检代理；`proxy_required` 表示代理地址缺失，保留为非重试配置错误；代理连接/TLS/超时等传输故障映射为 `proxy_error` 并可尝试其他已预检代理 | 尝试耗尽或无新代理时形成账号失败 |
 | IMAP 清箱 | 任一文件夹操作失败或复查未清空时记为 `imap_clear_failed`；清箱已开始后不重放账号流程，避免重复执行不可安全重放的删除操作 | 该账号失败；后续 Web 阶段不执行 |
 | Web 登录/别名读取 | 最多 `MAX_ATTEMPTS` 次尝试，失败时可更换预检代理；错误映射包括 `bad_credentials`、`login_challenged`、`rate_limited`、`proxy_error`、`network_error`、`alias_error` | 重试耗尽或代理耗尽后形成账号失败 |
 | 删除 ACTIVE 别名 | 只在 `remove_aliases: true` 时执行；单个删除失败会记录失败并继续处理其他别名，随后重新读取别名状态。是否满足最终输出筛选条件，以复查数量为准 | 不能把单次删除失败直接等同于整体 Web 阶段失败；详见下方结果筛选 |

@@ -97,7 +97,7 @@ def test_next_api_worker_local_mail_round_trip(tmp_path):
             proxy_text = "127.0.0.1:8080\n127.0.0.1:8081\n127.0.0.1:8082\n127.0.0.1:8083"
             assert client.put("/api/proxies", json={"proxies": proxy_text}, headers=headers).status_code == 200
             created = client.post("/api/jobs", json={"account_ids": ids, "workers": 1,
-                "change_password": True, "confirm_mailbox_cleanup": True, "confirm_change_password": True}, headers=headers)
+                "change_password": True, "confirm_mailbox_cleanup": True}, headers=headers)
             assert created.status_code == 202
             job_id = created.json()["id"]
             with client.stream("GET", f"/api/jobs/{job_id}/events") as response:

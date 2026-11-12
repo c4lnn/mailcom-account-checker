@@ -37,7 +37,6 @@ const errors: Record<string, string> = {
   job_already_running: "已有任务正在运行，请等待其完成", account_selection_invalid: "账号选择无效，请刷新后重试",
   candidate_not_uncertain: "该候选状态已变化，请刷新后查看", api_unavailable: "后端服务暂不可用，请稍后重试",
   mailbox_cleanup_confirmation_required: "请确认清空邮箱文件夹",
-  alias_removal_confirmation_required: "请确认删除别名", password_change_confirmation_required: "请确认修改密码",
 };
 
 export async function api<T>(url: string, init?: RequestInit): Promise<T> {
@@ -112,20 +111,18 @@ function TaskComposer({ accounts, active, onStarted }: { accounts: Account[]; ac
   const [verbose, setVerbose] = useState(false);
   const [clear, setClear] = useState(false);
   const [remove, setRemove] = useState(false);
-  const [confirmRemove, setConfirmRemove] = useState(false);
   const [change, setChange] = useState(false);
-  const [confirmChange, setConfirmChange] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   async function start(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setError(""); setMessage("");
-    if (!clear || (remove && !confirmRemove) || (change && !confirmChange)) { setError("请逐项确认所有启用的邮箱操作。"); return; }
+    if (!clear) { setError("请确认清空邮箱文件夹。"); return; }
     setBusy(true);
     try {
       const created = await api<{ id: string }>("/api/jobs", { method: "POST", body: JSON.stringify({
         account_ids: selected, workers, verbose, remove_aliases: remove, change_password: change,
-        confirm_mailbox_cleanup: clear, confirm_remove_aliases: confirmRemove, confirm_change_password: confirmChange,
+        confirm_mailbox_cleanup: clear,
       }) });
       setMessage(`任务 ${created.id.slice(0, 8)} 已加入队列`); setSelected([]); onStarted();
     } catch (cause) { setError(cause instanceof Error ? cause.message : "任务启动失败"); }
@@ -139,11 +136,9 @@ function TaskComposer({ accounts, active, onStarted }: { accounts: Account[]; ac
       <Field><FieldLabel htmlFor="workers">并发数</FieldLabel><Input id="workers" className="max-w-32" type="number" min={1} max={256} value={workers} onChange={(event) => setWorkers(Number(event.target.value))} /></Field>
       <FieldSet><FieldLegend>本次任务选项</FieldLegend><FieldGroup>
         <CheckField checked={verbose} onChange={setVerbose}>详细进度日志</CheckField>
-        <CheckField checked={remove} onChange={(value) => { setRemove(value); setConfirmRemove(false); }}>删除邮箱别名</CheckField>
-        {remove && <CheckField checked={confirmRemove} onChange={setConfirmRemove}>我确认删除所选账号的别名</CheckField>}
-        <CheckField checked={change} onChange={(value) => { setChange(value); setConfirmChange(false); }}>自动修改密码</CheckField>
-        {change && <CheckField checked={confirmChange} onChange={setConfirmChange}>我确认修改所选账号密码，并会留存候选密码</CheckField>}
         <CheckField checked={clear} onChange={setClear}>我确认清空 Drafts、INBOX、OUTBOX、Sent、Spam 和 Trash 文件夹</CheckField>
+        <CheckField checked={remove} onChange={setRemove}>删除邮箱别名（会删除所选账号的别名）</CheckField>
+        <CheckField checked={change} onChange={setChange}>自动修改密码（会更改所选账号密码，并留存候选密码）</CheckField>
       </FieldGroup></FieldSet>
       <Notice message={error} error /><Notice message={message} />
       <Button type="submit" disabled={busy || active || !selected.length}><Play data-icon="inline-start" />{active ? "已有任务运行中" : busy ? "正在启动…" : "开始任务"}</Button>

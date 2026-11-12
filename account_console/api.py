@@ -40,8 +40,6 @@ class JobBody(BaseModel):
     remove_aliases: bool = False
     change_password: bool = False
     confirm_mailbox_cleanup: bool = False
-    confirm_remove_aliases: bool = False
-    confirm_change_password: bool = False
 
 
 class SettingBody(BaseModel):
@@ -377,10 +375,6 @@ def create_app(
         require_same_origin(request)
         if not body.confirm_mailbox_cleanup:
             raise HTTPException(status_code=422, detail="mailbox_cleanup_confirmation_required")
-        if body.remove_aliases and not body.confirm_remove_aliases:
-            raise HTTPException(status_code=422, detail="alias_removal_confirmation_required")
-        if body.change_password and not body.confirm_change_password:
-            raise HTTPException(status_code=422, detail="password_change_confirmation_required")
         try:
             mocker_mode = os.environ.get("MAIL_MOCKER_MODE") == "1"
             mocker_plan = None
@@ -401,15 +395,11 @@ def create_app(
                 }
                 random_operations = set(mocker_config.get("operations", [])) if mocker_config.get("mode") == "random" else set()
                 scenario = mocker_config.get("scenario") if mocker_config.get("mode") == "scenario" else ""
-                if (scenario == "alias_delete_failure" or "alias_remove" in random_operations) and (
-                    not body.remove_aliases or not body.confirm_remove_aliases
-                ):
-                    raise HTTPException(status_code=422, detail="alias_removal_confirmation_required")
+                if (scenario == "alias_delete_failure" or "alias_remove" in random_operations) and not body.remove_aliases:
+                    raise HTTPException(status_code=422, detail="mocker_scenario_requires_alias_removal_option")
                 if (scenario in {"password_rejected", "password_uncertain"}
-                        or "password_change" in random_operations) and (
-                    not body.change_password or not body.confirm_change_password
-                ):
-                    raise HTTPException(status_code=422, detail="password_change_confirmation_required")
+                        or "password_change" in random_operations) and not body.change_password:
+                    raise HTTPException(status_code=422, detail="mocker_scenario_requires_password_change_option")
                 mocker_plan = build_plan(mocker_config, [row["email"] for row in accounts])
                 if mocker_plan.get("lifecycle") == "api_restart" and launcher is not None:
                     raise HTTPException(status_code=422, detail="mocker_lifecycle_requires_subprocess")

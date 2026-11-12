@@ -447,7 +447,6 @@ def test_api_to_worker_end_to_end_persists_success_failure_and_uncertain_candida
             response = client.post("/api/jobs", json={
                 "account_ids": account_ids, "workers": 1,
                 "change_password": True, "confirm_mailbox_cleanup": True,
-                "confirm_change_password": True,
             }, headers=headers)
             assert response.status_code == 202
             job_id = response.json()["id"]

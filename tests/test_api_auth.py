@@ -77,6 +77,7 @@ def test_mutations_require_same_origin_and_destructive_confirmations(tmp_path):
         client.post("/api/accounts/import", json={"content": "one@example.com----pw"},
                     headers={"Origin": "http://testserver"})
         account_id = client.get("/api/accounts?status=pending").json()["items"][0]["id"]
+        app.state.store.set_setting("proxies", "http://127.0.0.1:8080", is_secret=True)
 
         response = client.post(
             "/api/jobs",
@@ -99,16 +100,18 @@ def test_mutations_require_same_origin_and_destructive_confirmations(tmp_path):
         }
         response = client.post("/api/jobs", json=payload,
                                headers={"Origin": "http://testserver"})
-        assert response.status_code == 422
-        assert response.json()["detail"] == "alias_removal_confirmation_required"
+        assert response.status_code == 202
+        alias_job_id = response.json()["id"]
+        assert app.state.store.job_options(alias_job_id)["remove_aliases"] is True
 
+        app.state.store.set_job_status(alias_job_id, "interrupted")
         payload["remove_aliases"] = False
         payload["change_password"] = True
         response = client.post("/api/jobs", json=payload,
                                headers={"Origin": "http://testserver"})
-        assert response.status_code == 422
-        assert response.json()["detail"] == "password_change_confirmation_required"
-        assert app.state.store.list_jobs() == []
+        assert response.status_code == 202
+        password_job_id = response.json()["id"]
+        assert app.state.store.job_options(password_job_id)["change_password"] is True
 
 
 def test_password_candidate_requires_auth_and_can_be_verified(tmp_path):

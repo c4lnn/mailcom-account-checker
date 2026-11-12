@@ -26,7 +26,6 @@ export default function LoginPage() {
       });
       if (!response.ok) { setError("密码不正确或服务暂不可用"); return; }
       router.replace("/dashboard");
-      router.refresh();
     } catch { setError("无法连接服务，请稍后重试"); }
     finally { setBusy(false); }
   }

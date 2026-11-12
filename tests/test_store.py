@@ -119,3 +119,35 @@ def test_database_backup_preserves_rows(tmp_path):
             "SELECT password_enc FROM imported_accounts"
         ).fetchone()[0]
     assert box.decrypt(encrypted) == "BackupPassword!"
+
+def test_dashboard_returns_five_active_first_jobs_with_stable_recent_order(tmp_path):
+    store, database, box = make_store(tmp_path)
+    assert store.dashboard()["recent_jobs"] == []
+
+    jobs = [
+        ("old", "completed", "2026-01-01T00:00:00+00:00"),
+        ("running", "running", "2026-01-02T00:00:00+00:00"),
+        ("tie-a", "completed", "2026-01-05T00:00:00+00:00"),
+        ("queued", "queued", "2026-01-04T00:00:00+00:00"),
+        ("tie-b", "completed", "2026-01-05T00:00:00+00:00"),
+        ("new", "completed", "2026-01-06T00:00:00+00:00"),
+        ("middle", "failed", "2026-01-03T00:00:00+00:00"),
+    ]
+    with database.transaction() as connection:
+        for job_id, status, created_at in jobs:
+            connection.execute(
+                "INSERT INTO jobs(id,status,options_json,total_count,completed_count,created_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (job_id, status, box.encrypt("{}"), 4, 2, created_at),
+            )
+
+    dashboard = store.dashboard()
+    recent_jobs = dashboard["recent_jobs"]
+    assert [job["id"] for job in recent_jobs] == [
+        "queued", "running", "new", "tie-b", "tie-a",
+    ]
+    assert len(recent_jobs) == 5
+    assert all(job["completed_count"] == 2 and job["total_count"] == 4 for job in recent_jobs)
+    assert dashboard["latest_job"]["id"] == "new"
+    assert dashboard["active_job"]["status"] in {"queued", "running"}
+

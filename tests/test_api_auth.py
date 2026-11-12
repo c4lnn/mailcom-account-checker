@@ -381,3 +381,23 @@ def test_completed_sse_drains_all_batches_and_preserves_raw_sensitive_logs(tmp_p
         assert response.text.count("raw-password") == 601
         assert '"index": 602' in response.text
         assert response.text.rstrip().endswith('data: {"status": "completed"}')
+
+def test_dashboard_returns_recent_jobs_and_preserves_existing_fields(tmp_path):
+    app, _box = make_app(tmp_path)
+    with TestClient(app) as client:
+        headers = {"Origin": "http://testserver"}
+        client.post("/api/auth/login", json={"password": "console-test-password"}, headers=headers)
+        client.post("/api/accounts/import", json={"content": "dashboard@example.test----pw"},
+                    headers=headers)
+        account = client.get("/api/accounts").json()["items"][0]
+        job_id = app.state.store.create_job([account["id"]], {})
+
+        response = client.get("/api/dashboard")
+        assert response.status_code == 200
+        dashboard = response.json()
+
+    assert dashboard["recent_jobs"] == [dashboard["latest_job"]]
+    assert dashboard["recent_jobs"][0]["id"] == job_id
+    assert dashboard["active_job"]["id"] == job_id
+    assert dashboard["successful_count"] == 0
+    assert dashboard["failed_attempt_count"] == 0

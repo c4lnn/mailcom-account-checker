@@ -148,19 +148,29 @@ function CheckField({ checked, onChange, children, disabled = false }: { checked
 }
 
 function Dashboard() {
-  const state = useLoad<{ successful_count: number; failed_attempt_count: number; latest_job: Job | null; active_job: Job | null }>("/api/dashboard");
+  const state = useLoad<{ successful_count: number; failed_attempt_count: number; latest_job: Job | null; active_job: Job | null; recent_jobs: Job[] }>("/api/dashboard");
   if (state.loading) return <Loading />;
   if (state.error || !state.data) return <ErrorState message={state.error} retry={state.reload} />;
   const { data } = state;
   const job = data.active_job ?? data.latest_job;
   return <div className="flex flex-col gap-5">
-    <PageTitle title="仪表盘" description="查看账号检查概况与最近一次任务。" action={<Button role="link" nativeButton={false} render={<Link href="/current-task" />}>开始任务<ArrowRight data-icon="inline-end" /></Button>} />
+    <PageTitle title="仪表盘" description="查看账号检查概况与近期任务。" action={<Button role="link" nativeButton={false} render={<Link href="/current-task" />}>开始任务<ArrowRight data-icon="inline-end" /></Button>} />
     <section className="metric-grid" aria-label="账号统计">
       <Panel title="成功账号" description="当前已验证凭据"><strong className="metric-number">{data.successful_count}</strong></Panel>
       <Panel title="失败尝试" description="保留历史，不覆盖成功凭据"><strong className="metric-number">{data.failed_attempt_count}</strong></Panel>
       <Panel title="最近任务" description={job?.created_at ?? "导入账号后可创建检查任务"}>{job ? <div className="flex items-center gap-3"><Status value={job.status} /><strong>{job.completed_count}/{job.total_count}</strong></div> : <EmptyState>暂无任务</EmptyState>}</Panel>
     </section>
-    <Panel title="最近活动" description="最近任务执行状态">{job ? <div className="flex flex-wrap items-center gap-3"><strong>任务 {job.id.slice(0, 8)}</strong><Status value={job.status} /><Button role="link" nativeButton={false} variant="outline" size="sm" render={<Link href={data.active_job ? "/current-task" : "/logs"} />}>查看任务<ArrowRight data-icon="inline-end" /></Button></div> : <EmptyState>尚无历史记录</EmptyState>}</Panel>
+    <Panel title="最近活动" description="最近任务执行状态">
+      {data.recent_jobs.length ? <div className="flex flex-col gap-3">
+        <ol aria-label="最近任务活动" className="divide-y">
+          {data.recent_jobs.map((recentJob) => <li key={recentJob.id} className="flex flex-wrap items-center justify-between gap-3 py-3 first:pt-0 last:pb-0">
+            <div className="flex min-w-0 flex-col gap-1"><strong>任务 {recentJob.id.slice(0, 8)}</strong><span className="text-sm text-muted-foreground">{recentJob.created_at}</span></div>
+            <div className="flex items-center gap-3"><Status value={recentJob.status} /><strong>{recentJob.completed_count}/{recentJob.total_count}</strong></div>
+          </li>)}
+        </ol>
+        <div className="flex justify-end"><Button role="link" nativeButton={false} variant="outline" size="sm" render={<Link href="/logs" />}>查看全部<ArrowRight data-icon="inline-end" /></Button></div>
+      </div> : <EmptyState>尚无历史记录</EmptyState>}
+    </Panel>
   </div>;
 }
 

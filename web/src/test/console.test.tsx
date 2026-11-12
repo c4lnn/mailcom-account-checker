@@ -130,15 +130,42 @@ describe("控制台路由与交互", () => {
     vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve) => { respond = resolve; })));
     const view = render(<ConsoleView page="dashboard" />);
     expect(screen.getByRole("status", { name: "正在读取数据" })).toBeInTheDocument();
-    await act(async () => respond(await json({ successful_count: 0, failed_attempt_count: 0, latest_job: null, active_job: null })));
+    await act(async () => respond(await json({ successful_count: 0, failed_attempt_count: 0, latest_job: null, active_job: null, recent_jobs: [] })));
     expect(screen.getByText("暂无任务")).toBeInTheDocument();
+    expect(screen.getByText("尚无历史记录")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "开始任务" })).toHaveAttribute("href", "/current-task");
     view.unmount();
+    const job = { id: "history-1", status: "completed", created_at: "2026-01-02", completed_count: 15, total_count: 15 };
     vi.stubGlobal("fetch", vi.fn(() => json({ successful_count: 12, failed_attempt_count: 3,
-      latest_job: { id: "history-1", status: "completed", completed_count: 15, total_count: 15 }, active_job: null })));
+      latest_job: job, active_job: null, recent_jobs: [job] })));
     render(<ConsoleView page="dashboard" />);
     expect(await screen.findByText("12")).toBeInTheDocument();
-    expect(screen.getByText("15/15")).toBeInTheDocument();
+    expect(screen.getAllByText("15/15")).toHaveLength(2);
+    expect(screen.getByRole("list", { name: "最近任务活动" }).querySelectorAll("li")).toHaveLength(1);
+    expect(screen.getByRole("link", { name: "查看全部" })).toHaveAttribute("href", "/logs");
+  });
+
+  it("仪表盘按 API 活动优先顺序显示最多五条任务摘要", async () => {
+    const jobs = [
+      { id: "queued01", status: "queued", created_at: "2026-01-05", completed_count: 0, total_count: 2 },
+      { id: "running1", status: "running", created_at: "2026-01-04", completed_count: 1, total_count: 3 },
+      { id: "done0003", status: "completed", created_at: "2026-01-06", completed_count: 3, total_count: 3 },
+      { id: "done0002", status: "failed", created_at: "2026-01-03", completed_count: 1, total_count: 2 },
+      { id: "done0001", status: "interrupted", created_at: "2026-01-02", completed_count: 0, total_count: 1 },
+    ];
+    vi.stubGlobal("fetch", vi.fn(() => json({ successful_count: 0, failed_attempt_count: 0,
+      latest_job: jobs[2], active_job: jobs[0], recent_jobs: jobs })));
+    render(<ConsoleView page="dashboard" />);
+
+    const list = await screen.findByRole("list", { name: "最近任务活动" });
+    const rows = Array.from(list.querySelectorAll("li"));
+    expect(rows).toHaveLength(5);
+    expect(rows.map((row) => row.querySelector("strong")?.textContent)).toEqual([
+      "任务 queued01", "任务 running1", "任务 done0003", "任务 done0002", "任务 done0001",
+    ]);
+    expect(rows[0]).toHaveTextContent("0/2");
+    expect(rows[1]).toHaveTextContent("1/3");
+    expect(screen.getByRole("link", { name: "查看全部" })).toHaveAttribute("href", "/logs");
   });
 
   it("读取失败可重试，账号列表根据状态分别查询", async () => {

@@ -232,9 +232,15 @@ class Store:
             failed = connection.execute("SELECT COUNT(*) FROM failed_accounts").fetchone()[0]
             latest = connection.execute("SELECT id,status,created_at,completed_count,total_count FROM jobs ORDER BY created_at DESC,rowid DESC LIMIT 1").fetchone()
             active = connection.execute("SELECT id,status,created_at,completed_count,total_count FROM jobs WHERE status IN ('queued','running') LIMIT 1").fetchone()
+            recent = connection.execute(
+                "SELECT id,status,created_at,completed_count,total_count FROM jobs "
+                "ORDER BY CASE WHEN status IN ('queued','running') THEN 0 ELSE 1 END, "
+                "created_at DESC,rowid DESC LIMIT 5"
+            ).fetchall()
         return {"successful_count": success, "failed_attempt_count": failed,
                 "latest_job": dict(latest) if latest else None,
-                "active_job": dict(active) if active else None}
+                "active_job": dict(active) if active else None,
+                "recent_jobs": [dict(row) for row in recent]}
 
     def mark_orphans_interrupted(self, job_id: str | None = None) -> None:
         scope = " AND id=?" if job_id else ""

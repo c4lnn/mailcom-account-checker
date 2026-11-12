@@ -10,6 +10,7 @@ services:
       CONSOLE_PASSWORD: ${CONSOLE_PASSWORD:?set CONSOLE_PASSWORD}
       CONSOLE_SESSION_SECRET: ${CONSOLE_SESSION_SECRET:?set CONSOLE_SESSION_SECRET}
       CONSOLE_COOKIE_SECURE: "${CONSOLE_COOKIE_SECURE:-1}"
+      MAIL_MOCKER_MODE: "${MAIL_MOCKER_MODE:-0}"
     volumes:
       - account-data:/data
     expose:
@@ -30,3 +31,4 @@ services:
 
 volumes:
   account-data:
+    name: ${COMPOSE_PROJECT_NAME:-mailcom-account-checker}_account-data-${MAIL_MOCKER_MODE:-0}

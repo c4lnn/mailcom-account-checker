@@ -29,7 +29,10 @@ def local_port():
         return listener.getsockname()[1]
 
 
-def test_next_api_worker_local_mail_round_trip(tmp_path):
+def test_next_api_worker_local_mail_round_trip(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAIL_MOCKER_MODE", "0")
+    monkeypatch.setenv("CONSOLE_PASSWORD", "console-test-password")
+    monkeypatch.setenv("CONSOLE_COOKIE_SECURE", "0")
     root = Path(__file__).resolve().parents[1]
     api_port, web_port = local_port(), local_port()
     box = SecretBox(Fernet.generate_key().decode())
@@ -86,6 +89,8 @@ def test_next_api_worker_local_mail_round_trip(tmp_path):
             login = client.post("/api/auth/login", json={"password": "console-test-password"}, headers=headers)
             assert login.status_code == 200, login.text
             assert "httponly" in login.headers["set-cookie"].lower()
+            assert client.get("/api/runtime-config").json() == {"mocker_enabled": False}
+            assert client.get("/mocker").status_code == 404
             for path in paths:
                 response = client.get("/" + path)
                 assert response.status_code == 200

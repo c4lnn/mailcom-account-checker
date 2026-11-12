@@ -124,6 +124,9 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         mocker_service: MockMailService | None = None
+        mode = os.environ.get("MAIL_MOCKER_MODE", "0")
+        if mode not in {"0", "1"}:
+            raise RuntimeError("mocker_mode_invalid")
         mocker_env_keys = (
             "MAIL_API_ENDPOINT_OVERRIDES", "MAIL_MOCKER_IMAP_HOST",
             "MAIL_MOCKER_IMAP_PORT", "MAIL_MOCKER_CERT",

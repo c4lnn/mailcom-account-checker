@@ -747,6 +747,18 @@ def test_mocker_configuration_api_is_hidden_outside_test_mode(tmp_path, monkeypa
         assert client.put("/api/mocker/config", json={"scenario": "success"}, headers=headers).status_code == 404
 
 
+
+def test_invalid_mocker_mode_prevents_api_startup(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAIL_MOCKER_MODE", "true")
+    database = Database(tmp_path / "invalid-mode.sqlite3")
+    app = create_app(
+        database, signer=SessionSigner("v" * 48), mark_orphans_on_start=False,
+    )
+    with pytest.raises(RuntimeError, match="mocker_mode_invalid"):
+        with TestClient(app):
+            pass
+    assert not database.path.exists()
+
 def test_worker_interruption_is_test_only_and_marks_the_job_interrupted(tmp_path, monkeypatch):
     key = Fernet.generate_key().decode("ascii")
     db_path = tmp_path / "worker-interruption.sqlite3"

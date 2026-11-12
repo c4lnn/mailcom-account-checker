@@ -2,7 +2,7 @@
 
 控制台由 Next.js Web、FastAPI API/worker 和 SQLite 组成。Docker Compose 直接发布 Next.js Web 端口；可通过服务器 IP 和端口使用 HTTP，也可由部署者自己的反向代理提供 HTTP 或 HTTPS。FastAPI API 只在 Compose 内部网络可达。
 
-仓库提供 Docker Compose 单机部署，不包含反向代理、TLS 终止或证书管理。Web 主机端口默认为 `3000`，可通过 `WEB_PORT` 修改。API 不发布主机端口；SQLite 保存在 `account-data` 持久卷中。
+仓库提供单一 Docker Compose 部署入口，一次运行生产或 Mocker 中的一种模式。Web 主机端口默认为 `3000`，可通过 `WEB_PORT` 修改；API 只在 Compose 内部网络可达。生产和 Mocker 使用独立命名卷，分别映射到容器内 `/data`。
 
 ## 首次配置
 
@@ -35,13 +35,14 @@ chmod 600 .env
 | `CONSOLE_PASSWORD` | 单用户登录密码 |
 | `CONSOLE_SESSION_SECRET` | 至少 32 字符的会话签名密钥 |
 | `ACCOUNT_CHECKER_ENCRYPTION_KEY` | Fernet 格式的凭据加密密钥 |
-| `ACCOUNT_CHECKER_DB` | SQLite 文件路径；默认 `data/account-checker.sqlite3` |
 | `WEB_PORT` | Compose 发布到主机的 Web 端口；默认 `3000` |
 | `CONSOLE_COOKIE_SECURE` | 会话 cookie 的 Secure 属性；默认 `1`，HTTP 访问设为 `0`，HTTPS 访问设为 `1` |
+| `MAIL_MOCKER_MODE` | `0` 为生产，`1` 为隔离 Mocker；默认 `0` |
+| `COMPOSE_PROJECT_NAME` | 稳定的 Compose 项目名和卷命名空间；同一主机多部署时必须唯一 |
 
 ## Docker Compose 部署
 
-完成上方 Linux `.env` 配置后，按 HTTP/HTTPS 访问方式设置 `CONSOLE_COOKIE_SECURE`，需要时设置 `WEB_PORT`。启动服务：
+完成 `.env` 配置后，设置 `MAIL_MOCKER_MODE=0` 启动生产，或设为 `1` 启动隔离 Mocker。两种模式共用 `CONSOLE_PASSWORD`、`CONSOLE_SESSION_SECRET` 和 `ACCOUNT_CHECKER_ENCRYPTION_KEY`；不要把 Mocker 部署暴露给非受信用户。直接 HTTP 访问需设 `CONSOLE_COOKIE_SECURE=0`，HTTPS 设为 `1`。同一主机运行多份部署时，为每份部署设置唯一且稳定的 `COMPOSE_PROJECT_NAME`。
 
 ```sh
 docker compose up -d --build
@@ -49,9 +50,53 @@ docker compose ps
 docker compose logs -f api web
 ```
 
-直接访问时使用 `http://服务器IP:${WEB_PORT:-3000}`，并将 `CONSOLE_COOKIE_SECURE=0`。如果使用自己的反向代理，由代理转发到服务器 Web 端口；代理需保留原始 `Host`，并设置 `X-Forwarded-Proto` 为浏览器所用协议。经 HTTPS 访问时设 `CONSOLE_COOKIE_SECURE=1`；若代理对外使用 HTTP，则设为 `0`。API 仅在 Compose 私有网络内暴露，不要给 `api` 增加主机端口映射。`account-data` 卷保存 SQLite。更新时再次执行 `docker compose up -d --build`。停止服务使用 `docker compose down`，不要加 `-v`，否则会删除数据库卷。
+模式切换时先运行 `docker compose down`（不要加 `-v`），修改 `.env` 中的 `MAIL_MOCKER_MODE`，再运行 `docker compose up -d --build`。两种模式使用同一 Web 端口和地址，必须一次只运行一种。Compose 在切换时可能提示另一个模式的命名卷未匹配当前配置并保留该卷，这是预期行为；确认卷名后继续，勿手动删除。`down -v` 会删除当前模式卷，禁止在模式切换或升级时使用。
 
-部署前先在隔离测试中使用合成账号和本地 mocker 验证版本，不要把合成账号交给生产 worker。真实任务会清空所选邮箱文件夹，必须在控制台逐项确认。
+### 从现有双 Compose 部署迁移
+
+新卷名为 `${COMPOSE_PROJECT_NAME}_account-data-0`（生产）和 `${COMPOSE_PROJECT_NAME}_account-data-1`（Mocker）。旧版默认卷名为 `${COMPOSE_PROJECT_NAME}_account-data` 和 `${COMPOSE_PROJECT_NAME}_mocker-data`。升级时先记录旧 Compose 项目名，并确认新 `.env` 的 `COMPOSE_PROJECT_NAME` 与其一致；替换旧 Compose 文件前停止此前运行过的生产和 Mocker 服务，保留旧卷。更新文件后按下方命令分别备份旧数据库，再迁移到对应模式卷。复制前确认目标数据库不存在；SQLite backup API 会读取一致性快照，不会改写旧卷，旧卷可用于回滚。
+
+升级前、替换旧部署文件之前，停止曾运行过的栈（Mocker 命令仅在旧 Mocker 栈曾启动时执行）：
+
+```sh
+docker compose down
+docker compose --env-file .env.mocker -f docker-compose.mocker.yml down
+```
+
+新 Compose 配置可将旧卷只读挂载并用 SQLite backup API 导出到主机的受保护目录（先创建 `/secure-backups`；生产和 Mocker 分别执行，按当前模式选择旧卷和旧数据库文件名）：
+
+```sh
+PROJECT="mailcom-account-checker" # 与 .env 中的 COMPOSE_PROJECT_NAME 一致；自定义时同步修改
+docker compose --env-file .env --project-name "$PROJECT" run --rm --no-deps -T -e ACCOUNT_CHECKER_DB=/legacy/account-checker.sqlite3 -v "${PROJECT}_account-data:/legacy:ro" -v /secure-backups:/backup --entrypoint python api -m account_console.backup /backup/production.sqlite3
+```
+
+备份 Mocker 时，将 `.env` 的 `MAIL_MOCKER_MODE` 设为 `1`，将旧卷改为 `${PROJECT}_mocker-data`、`ACCOUNT_CHECKER_DB` 改为 `/legacy/mocker-account-checker.sqlite3`，并将备份文件名改为 `mocker.sqlite3`。
+
+生产迁移：将 `.env` 的 `MAIL_MOCKER_MODE` 设为 `0`，执行：
+
+```sh
+PROJECT="mailcom-account-checker" # 与 .env 中的 COMPOSE_PROJECT_NAME 一致；自定义时同步修改
+docker compose --env-file .env --project-name "$PROJECT" run --rm --no-deps -T -v "${PROJECT}_account-data:/legacy:ro" --entrypoint python api -c '
+import sqlite3
+from pathlib import Path
+s = Path("/legacy/account-checker.sqlite3")
+t = Path("/data/account-checker.sqlite3")
+assert s.is_file() and not t.exists()
+src = sqlite3.connect(f"file:{s}?mode=ro", uri=True)
+dst = sqlite3.connect(t)
+src.backup(dst)
+dst.close()
+src.close()
+'
+```
+
+Mocker 迁移：将 `.env` 的 `MAIL_MOCKER_MODE` 设为 `1`，运行同一命令，但把旧卷改为 `${PROJECT}_mocker-data`，并把源路径改为 `/legacy/mocker-account-checker.sqlite3`。目标路径仍为 `/data/account-checker.sqlite3`。若旧部署使用自定义项目名，使用其实际卷名；先用 `docker volume ls` 核对，不要猜测卷名。迁移后设回所需模式，启动服务并核对账号、任务和日志；验证完成前保留旧卷，以便回滚。
+
+### Mocker 模式
+
+Mocker 模式复用同一套 API/Web 服务和 `.env`，但使用独立数据卷。API 只允许合成 `@example.test` 账号；worker 网络守卫阻断外部 HTTP、代理、重定向和 socket 出口。Mocker 与生产共用密钥、密码和会话签名；数据卷隔离不隔离这些秘密的泄露影响。同主机名下有效期内的会话 cookie 在模式切换后仍可能有效。
+
+结束测试后使用 `docker compose down`；不要使用 `-v`，除非明确要永久删除当前模式的数据卷。
 
 在本机启动 API 的命令：
 
@@ -63,32 +108,7 @@ API 启动时初始化 schema，并将遗留的排队/运行中任务标为中�
 
 Web 本机启动与操作流程见 [Web README](../web/README.md)。代理在独立页面维护为唯一的全局列表，认证信息加密保存；页面只显示配置状态和数量，不回显凭据。任务创建时固定当时的代理列表，后续代理修改只影响新任务。任务选项依次为并发、详细日志、清空文件夹确认、删除别名、修改密码；清空文件夹必须单独确认，别名删除和改密默认关闭，勾选即授权对应操作。IPinfo 密钥保留在配置页。
 
-## 隔离的手动 Mocker 环境
-
-手动测试环境使用独立 Compose 文件、`.env.mocker`、`mocker-data` 命名卷和 SQLite 文件，不共享生产 `account-data`。只使用预置或导入的 `@example.test` 合成账号；API 会拒绝其他域名。worker 将 HTTP 与 IMAP TLS 目标校验为 loopback，并阻断外部 HTTP、代理、重定向和 socket 出口。该运行模式不是生产任务选项。
-
-在仓库根目录创建本地配置并设置独立密钥：
-
-```powershell
-Copy-Item .env.mocker.example .env.mocker
-$key = & .venv\Scripts\python.exe -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-$session = & .venv\Scripts\python.exe -c "import secrets; print(secrets.token_urlsafe(48))"
-```
-
-将 `$key`、`$session` 和仅供本机使用的 `CONSOLE_PASSWORD` 写入 `.env.mocker`。该文件已被 Git 忽略；不要复制生产密钥、真实账号或代理。
-
-启动与访问：
-
-```powershell
-docker compose --env-file .env.mocker -f docker-compose.mocker.yml up -d --build
-docker compose --env-file .env.mocker -f docker-compose.mocker.yml ps
-```
-
-默认访问 `http://localhost:3001`。API 不发布主机端口；Web 从 API 的运行时标志显示 Mocker 页面，不依赖另一份前端构建。测试数据库位于独立 `mocker-data` 卷。停止时保留该卷：
-
-```powershell
-docker compose --env-file .env.mocker -f docker-compose.mocker.yml down
-```
+## Mocker 故障场景
 
 控制台预置 `good@example.test` 与 `bad@example.test` 合成记录；成功场景凭据为 `GoodPassword!`，`bad@example.test` 的导入密码故意与 mock 服务密码不符，用于登录失败场景。也可在账号页导入其他 `@example.test` 记录。
 
@@ -96,11 +116,7 @@ docker compose --env-file .env.mocker -f docker-compose.mocker.yml down
 
 `worker_interrupted` 会让隔离 worker 进程异常退出，API 将任务标记为中断。`api_restart` 会让专用测试 API 在 worker 进入运行态后以退出码 70 退出；Compose 的 `restart: unless-stopped` 会重启 API，启动恢复将任务标记为中断，用户可刷新页面并创建后续任务。API 手动运行时，需由操作者重新启动进程。两种场景都不会自动重跑邮箱操作；已提交的改密候选会转为待核实。
 
-生产 Compose 不设置 `MAIL_MOCKER_MODE`，因此不显示该导航；直接访问测试页或 Mocker 配置 API 会被拒绝。不要在生产服务设置该变量。测试结束后，如需删除测试数据库，再明确删除隔离卷：
-
-```powershell
-docker compose --env-file .env.mocker -f docker-compose.mocker.yml down -v
-```
+端到端本地 Mocker 验收见下方测试说明。
 
 ## 日志、结果与异常恢复
 

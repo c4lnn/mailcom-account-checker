@@ -8,10 +8,13 @@ from account_console.mocker import MAIL_ORIGINS, MockAccount, MockMailService, M
 from account_console.security import SecretBox
 from account_console.store import Store
 from account_console.worker import run_job
+from account_console.db import Database
 from account_console.api import create_app
 from imap_fallback import ImapFolderClearClient
 from mailcom_client import MailComClient, MailComError, SETTINGS_CLIENT_ID, SETTINGS_SCOPE
 from account_console.security import SessionSigner
+from check_and_clean_accounts import check_pairs_parallel
+from imap_fallback import ImapFallbackError
 from fastapi.testclient import TestClient
 
 
@@ -466,8 +469,75 @@ def test_api_to_worker_end_to_end_persists_success_failure_and_uncertain_candida
     finally:
         service.close()
 
+@pytest.mark.parametrize("kind", ["proxy_connect", "proxy_timeout"])
+def test_proxy_configuration_errors_stop_but_transport_errors_retry(kind):
+    from check_and_clean_accounts import _status
+
+    assert _status(ImapFallbackError("proxy_required")) == "proxy_required"
+    assert _status(ImapFallbackError(kind)) == "proxy_error"
+
+    proxies = [(1, "http://127.0.0.1:8081"), (2, "http://127.0.0.1:8082")]
+    preflights = []
+    attempts = []
+
+    class Client:
+        def __init__(self, proxy_url):
+            self.proxy_url = proxy_url
+
+        def connect(self):
+            attempts.append(self.proxy_url)
+            if len(attempts) == 1:
+                raise ImapFallbackError(kind)
+
+        def clear_folders(self, _folders):
+            return {folder: {"after": 0} for folder in (
+                "Drafts", "INBOX", "OUTBOX", "Sent", "Spam", "Trash",
+            )}
+
+        def close(self):
+            pass
+
+    result = check_pairs_parallel(
+        [(1, "good@example.test", "password")], workers=1,
+        proxy_pool=proxies,
+        client_factory=lambda _email, _password, *, proxy_url: Client(proxy_url),
+        transport_probe=lambda proxy: preflights.append(proxy),
+        exit_lookup=lambda _proxy: {
+            "ip": "127.0.0.1", "country_code": "LO", "country_name": "Local",
+        },
+    )
+    assert result[0]["ok"] is True
+    assert len(attempts) == 2
+    assert attempts[0] != attempts[1]
+    assert len(preflights) == 2
+
+
+def test_proxy_required_stops_without_consuming_another_candidate():
+    proxies = [(1, "http://127.0.0.1:8081"), (2, "http://127.0.0.1:8082")]
+    preflights = []
+
+    class Client:
+        def connect(self):
+            raise ImapFallbackError("proxy_required")
+
+        def close(self):
+            pass
+
+    result = check_pairs_parallel(
+        [(1, "good@example.test", "password")], workers=1,
+        proxy_pool=proxies,
+        client_factory=lambda *_args, **_kwargs: Client(),
+        transport_probe=lambda proxy: preflights.append(proxy),
+        exit_lookup=lambda _proxy: {
+            "ip": "127.0.0.1", "country_code": "LO", "country_name": "Local",
+        },
+    )
+    assert result[0]["error"] == "proxy_required"
+    assert len(preflights) == 1
+
 def test_manual_mocker_mode_routes_default_worker_locally_and_seeds_synthetic_accounts(tmp_path, monkeypatch):
     key = Fernet.generate_key().decode("ascii")
+    monkeypatch.setenv("CONSOLE_PASSWORD", "console-test-password")
     monkeypatch.setenv("MAIL_MOCKER_MODE", "1")
     monkeypatch.setenv("ACCOUNT_CHECKER_DB", str(tmp_path / "manual-mocker.sqlite3"))
     monkeypatch.setenv("ACCOUNT_CHECKER_ENCRYPTION_KEY", key)
@@ -501,6 +571,9 @@ def test_manual_mocker_mode_routes_default_worker_locally_and_seeds_synthetic_ac
             time.sleep(0.05)
         assert job["status"] == "completed", job
         assert job["results"][0]["result"]["ok"] is True
+        assert job["results"][0]["result"]["proxy_index"] in {1, 2, 3, 4}
+        assert not any(event["payload"].get("error") == "proxy_required"
+                       for event in client.get(f"/api/jobs/{job_id}/logs").json()["items"] )
 
 
 def test_seed_plan_is_stable_and_bound_to_account_operation_sequence():
@@ -517,6 +590,96 @@ def test_seed_plan_is_stable_and_bound_to_account_operation_sequence():
     assert {item["email"] for item in first["faults"]} == {"a@example.test", "b@example.test"}
     assert {item["operation"] for item in first["faults"]} == {"login", "imap_select"}
     assert {item["sequence"] for item in first["faults"]} == set(range(1, 13))
+
+
+def test_proxy_fault_plans_are_stable_and_candidate_bound():
+    from account_console.mocker_scenarios import build_plan
+
+    config = {
+        "mode": "random", "seed": "proxy-seed", "operations": [
+            "proxy_preflight", "proxy_transport",
+        ], "probability": 1,
+    }
+    first = build_plan(config, ["b@example.test", "a@example.test"])
+    second = build_plan(config, ["a@example.test", "b@example.test"])
+    assert first == second
+    preflight = [item for item in first["faults"] if item["operation"] == "proxy_preflight"]
+    transport = [item for item in first["faults"] if item["operation"] == "proxy_transport"]
+    assert {item["candidate"] for item in preflight} == {1, 2, 3, 4}
+    assert {(item["email"], item["candidate"]) for item in transport} == {
+        (email, candidate) for email in {"a@example.test", "b@example.test"}
+        for candidate in range(1, 5)
+    }
+
+
+def test_mocker_proxy_fault_scenarios_retry_exhaust_and_replay(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAIL_MOCKER_MODE", "1")
+    monkeypatch.setenv("CONSOLE_PASSWORD", "console-test-password")
+    monkeypatch.setenv("CONSOLE_COOKIE_SECURE", "0")
+    database = Database(tmp_path / "mocker-proxy.sqlite3")
+    key = Fernet.generate_key().decode("ascii")
+    app = create_app(database, secrets_box=SecretBox(key),
+                     signer=SessionSigner("p" * 48),
+                     launcher=lambda job_id: run_job(
+                         job_id, database=database, secrets_box=SecretBox(key),
+                     ), mark_orphans_on_start=False)
+
+    with TestClient(app) as client:
+        headers = {"Origin": "http://testserver"}
+        assert client.post("/api/auth/login", json={
+            "password": "console-test-password",
+        }, headers=headers).status_code == 200
+        account = next(row for row in client.get("/api/accounts").json()["items"]
+                       if row["email"] == "good@example.test")
+
+        def run_scenario(scenario):
+            config = {"mode": "scenario", "scenario": scenario, "seed": "",
+                      "operations": [], "probability": 0.1}
+            assert client.put("/api/mocker/config", json=config, headers=headers).status_code == 200
+            response = client.post("/api/jobs", json={
+                "account_ids": [account["id"]], "workers": 1,
+                "confirm_mailbox_cleanup": True,
+            }, headers=headers)
+            assert response.status_code == 202, response.text
+            job_id = response.json()["id"]
+            for _ in range(200):
+                job = client.get(f"/api/jobs/{job_id}").json()
+                if job["status"] in {"completed", "failed", "interrupted"}:
+                    break
+                time.sleep(0.05)
+            assert job["status"] == "completed", job
+            logs = client.get(f"/api/jobs/{job_id}/logs").json()["items"]
+            return job, logs
+
+        preflight_job, preflight_logs = run_scenario("proxy_preflight_failure")
+        assert preflight_job["results"][0]["result"]["ok"] is True
+        assert preflight_job["results"][0]["result"]["proxy_index"] == 2
+        assert any(item["payload"].get("error") == "proxy_connect" for item in preflight_logs)
+
+        transport_job, transport_logs = run_scenario("proxy_transport_failure")
+        assert transport_job["results"][0]["result"]["ok"] is True
+        assert transport_job["results"][0]["result"]["proxy_index"] == 2
+        assert any(item["payload"].get("error") == "proxy_error" for item in transport_logs)
+        plan = transport_job["options"]["mocker_plan"]
+        replay = client.post(
+            f"/api/jobs/{transport_job['id']}/replay", headers=headers,
+        )
+        assert replay.status_code == 202, replay.text
+        replay_id = replay.json()["id"]
+        for _ in range(200):
+            replay_job = client.get(f"/api/jobs/{replay_id}").json()
+            if replay_job["status"] in {"completed", "failed", "interrupted"}:
+                break
+            time.sleep(0.05)
+        assert replay_job["status"] == "completed", replay_job
+        assert replay_job["options"]["mocker_plan"] == plan
+        assert replay_job["results"][0]["result"]["proxy_index"] == 2
+
+        exhausted_job, exhausted_logs = run_scenario("proxy_candidates_exhausted")
+        assert exhausted_job["results"][0]["result"]["error"] == "proxy_unavailable"
+        assert sum(item["payload"].get("operation") == "CONNECT/TLS"
+                   and item["payload"].get("status") == "失败"
+                   for item in exhausted_logs) == 4
 
 
 def test_mocker_config_and_job_plan_are_authenticated_persisted_and_replayable(tmp_path, monkeypatch):
@@ -556,6 +719,7 @@ def test_mocker_config_and_job_plan_are_authenticated_persisted_and_replayable(t
         assert replayed.status_code == 202
         replay_id = replayed.json()["id"]
         assert app.state.store.job_options(replay_id)["mocker_plan"] == plan
+        app.state.store.set_job_status(replay_id, "completed")
         assert launched == [job_id, replay_id]
 
         unsupported_id = app.state.store.create_job([account["id"]], {
@@ -569,6 +733,7 @@ def test_mocker_config_and_job_plan_are_authenticated_persisted_and_replayable(t
 
 def test_mocker_configuration_api_is_hidden_outside_test_mode(tmp_path, monkeypatch):
     monkeypatch.delenv("MAIL_MOCKER_MODE", raising=False)
+    monkeypatch.setenv("CONSOLE_PASSWORD", "console-test-password")
     app = create_app(
         Database(tmp_path / "normal-mode.sqlite3"),
         signer=SessionSigner("n" * 48), launcher=lambda _job_id: None,
@@ -576,7 +741,7 @@ def test_mocker_configuration_api_is_hidden_outside_test_mode(tmp_path, monkeypa
     )
     with TestClient(app) as client:
         headers = {"Origin": "http://testserver"}
-        client.post("/api/auth/login", json={"password": "console-test-password"}, headers=headers)
+        assert client.post("/api/auth/login", json={"password": "console-test-password"}, headers=headers).status_code == 200
         assert client.get("/api/runtime-config").json() == {"mocker_enabled": False}
         assert client.get("/api/mocker/config").status_code == 404
         assert client.put("/api/mocker/config", json={"scenario": "success"}, headers=headers).status_code == 404
@@ -636,10 +801,11 @@ def test_worker_network_guard_blocks_http_proxy_redirect_dns_and_sockets(block_n
             session.get("https://example.com")
         with pytest.raises(RuntimeError, match="mocker_network_egress_blocked"):
             session.get("http://127.0.0.1:1", proxies={"http": "http://example.com:8080"})
-        with pytest.raises(RuntimeError, match="mocker_network_egress_blocked"):
+        with pytest.raises(AssertionError, match="test network egress blocked"):
             socket.create_connection(("203.0.113.10", 993), timeout=0.1)
-        with pytest.raises(RuntimeError, match="mocker_network_egress_blocked"):
+        with pytest.raises(AssertionError, match="test network egress blocked"):
             socket.create_connection(("example.com", 443), timeout=0.1)
+        block_nonlocal_network.clear()
         with socket.socket() as connection:
             with pytest.raises(RuntimeError, match="mocker_network_egress_blocked"):
                 connection.connect(("203.0.113.10", 993))

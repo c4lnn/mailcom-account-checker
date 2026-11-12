@@ -145,6 +145,7 @@ def create_app(
                 ),
                 "bad@example.test": MockAccount("ServerPassword!"),
             })).start()
+            _app.state.mocker_service = mocker_service
             _app.state.mocker_initial_passwords = {
                 "good@example.test": "GoodPassword!", "bad@example.test": "ServerPassword!",
             }

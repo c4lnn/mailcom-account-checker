@@ -635,6 +635,8 @@ def _status(exc: ImapFallbackError) -> str:
         return "login_challenged"
     if kind in {"rate_limited", "imap_rate_limited"}:
         return "rate_limited"
+    if kind == "proxy_required":
+        return "proxy_required"
     if kind.startswith("proxy_"):
         return "proxy_error"
     if kind in {"imap_timeout", "imap_network"}:
@@ -735,6 +737,9 @@ def _check_imap(
                 progress.report("文件夹处理" if clearing_started else "连接/登录", "失败", error=last_error)
         finally:
             _close_imap_client(client)
+        if last_error == "proxy_required":
+            progress.report("IMAP重试", "停止", reason="代理地址未配置", error=last_error)
+            break
         if last_error == "imap_clear_failed":
             progress.report("IMAP重试", "停止", reason="文件夹处理失败不可重放", error=last_error)
             break

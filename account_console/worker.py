@@ -147,6 +147,27 @@ def run_job(
                 fail_mocker("mocker_target_not_local")
             if not os.path.isfile(certificate):
                 fail_mocker("mocker_certificate_missing")
+            from imap_fallback import ImapFallbackError
+
+            mocker_plan = options.get("mocker_plan") or {}
+            proxy_indexes = {
+                proxy: index for index, proxy in enumerate(options.get("proxies", []), 1)
+            }
+
+            def planned_proxy_fault(operation: str, email: str, candidate: int | None):
+                for fault in mocker_plan.get("faults", []):
+                    if (fault.get("operation") == operation
+                            and fault.get("candidate") == candidate
+                            and (not email or fault.get("email", "").lower() == email.lower())):
+                        return fault.get("fault")
+                return None
+
+            def proxy_fault_error(fault: str):
+                kind = fault if fault.startswith("proxy_") else (
+                    "proxy_timeout" if fault == "drop" else "proxy_connect"
+                )
+                return ImapFallbackError(kind)
+
             imap_host, imap_port = host, port
             if imap_connection_factory is None:
                 import imaplib
@@ -156,7 +177,11 @@ def run_job(
                     host, port, ssl_context=context,
                 )
             if transport_probe is None:
-                transport_probe = lambda _proxy: None
+                def transport_probe(proxy: str) -> None:
+                    candidate = proxy_indexes.get(proxy)
+                    fault = planned_proxy_fault("proxy_preflight", "", candidate)
+                    if fault:
+                        raise proxy_fault_error(fault)
             if exit_lookup is None:
                 exit_lookup = lambda _proxy: {
                     "ip": "127.0.0.1", "country_code": "LO", "country_name": "Local",
@@ -177,13 +202,24 @@ def run_job(
             def client_factory(username: str, password: str, *, proxy_url: str):
                 from imap_fallback import ImapFolderClearClient
 
-                kwargs: dict[str, Any] = {"proxy_url": "" if mocker_mode else proxy_url}
+                kwargs: dict[str, Any] = {"proxy_url": proxy_url}
                 if imap_host is not None:
                     kwargs["host"] = imap_host
                 if imap_port is not None:
                     kwargs["port"] = imap_port
                 if imap_connection_factory is not None:
-                    kwargs["connection_factory"] = imap_connection_factory
+                    connection_factory = imap_connection_factory
+                    if mocker_mode:
+                        candidate = proxy_indexes.get(proxy_url)
+                        base_connection_factory = imap_connection_factory
+
+                        def connection_factory(*args, **factory_kwargs):
+                            fault = planned_proxy_fault("proxy_transport", username, candidate)
+                            if fault:
+                                raise proxy_fault_error(fault)
+                            return base_connection_factory(*args, **factory_kwargs)
+
+                    kwargs["connection_factory"] = connection_factory
                 return ImapFolderClearClient(username, password, **kwargs)
         if alias_client_factory is None:
             from mailcom_client import MailComClient
@@ -258,6 +294,8 @@ def run_job(
             "ipinfo_key": str(options.get("ipinfo_key") or ""),
             "password_change_callback": password_change_event,
         }
+        if mocker_mode:
+            kwargs["proxy_choice"] = lambda available: min(available)
         if transport_probe is not None:
             kwargs["transport_probe"] = transport_probe
         if exit_lookup is not None:

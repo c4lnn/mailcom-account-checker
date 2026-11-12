@@ -8,6 +8,7 @@ PLAN_VERSION = 1
 OPERATIONS = (
     "login", "oauth", "alias_list", "alias_remove", "password_change",
     "imap_login", "imap_select", "imap_store", "imap_expunge",
+    "proxy_preflight", "proxy_transport",
 )
 SCENARIOS = {
     "success": "正常登录并清理合成邮箱",
@@ -19,6 +20,9 @@ SCENARIOS = {
     "alias_delete_failure": "别名删除失败",
     "password_uncertain": "修改密码提交后响应丢失",
     "password_rejected": "修改密码被拒绝",
+    "proxy_preflight_failure": "代理预检失败后切换候选",
+    "proxy_transport_failure": "代理传输中断后重试",
+    "proxy_candidates_exhausted": "代理候选耗尽",
     "worker_interrupted": "测试 worker 意外退出",
     "api_restart": "测试 API 重启与任务恢复",
 }
@@ -53,6 +57,16 @@ def build_plan(config: dict[str, Any], emails: list[str]) -> dict[str, Any]:
             operation, sequence, fault = targets[scenario]
             faults = [{"email": email.lower(), "operation": operation,
                        "sequence": sequence, "fault": fault} for email in sorted(emails)]
+        elif scenario == "proxy_preflight_failure":
+            faults = [{"email": "", "operation": "proxy_preflight", "sequence": 1,
+                       "candidate": 1, "fault": "proxy_connect"}]
+        elif scenario == "proxy_transport_failure":
+            faults = [{"email": email.lower(), "operation": "proxy_transport", "sequence": 1,
+                       "candidate": 1, "fault": "proxy_connect"} for email in sorted(emails)]
+        elif scenario == "proxy_candidates_exhausted":
+            faults = [{"email": "", "operation": "proxy_preflight", "sequence": candidate,
+                       "candidate": candidate, "fault": "proxy_connect"}
+                      for candidate in range(1, 5)]
         plan = {"version": PLAN_VERSION, "mode": mode, "scenario": scenario, "faults": faults}
         if scenario == "worker_interrupted":
             plan["lifecycle"] = "worker_interrupt"
@@ -71,13 +85,31 @@ def build_plan(config: dict[str, Any], emails: list[str]) -> dict[str, Any]:
         raise ValueError("mocker_operation_invalid")
     if not isinstance(probability, (int, float)) or not 0 <= probability <= 1:
         raise ValueError("mocker_probability_invalid")
+    selected_operations = sorted(set(operations))
+    proxy_operations = {"proxy_preflight", "proxy_transport"} & set(selected_operations)
     for email in sorted(set(value.lower() for value in emails)):
-        for operation in sorted(set(operations)):
+        for operation in selected_operations:
+            if operation in proxy_operations:
+                continue
             for sequence in range(1, 13):
                 fault = _fault_for(operation, seed, email, sequence, float(probability))
                 if fault:
                     faults.append({"email": email, "operation": operation,
                                    "sequence": sequence, "fault": fault})
+    for candidate in range(1, 5):
+        if "proxy_preflight" in proxy_operations:
+            fault = _fault_for("proxy_preflight", seed, "proxy-pool", candidate,
+                               float(probability))
+            if fault:
+                faults.append({"email": "", "operation": "proxy_preflight",
+                               "sequence": candidate, "candidate": candidate, "fault": fault})
+        if "proxy_transport" in proxy_operations:
+            for email in sorted(set(value.lower() for value in emails)):
+                fault = _fault_for("proxy_transport", seed, email, candidate,
+                                   float(probability))
+                if fault:
+                    faults.append({"email": email, "operation": "proxy_transport",
+                                   "sequence": candidate, "candidate": candidate, "fault": fault})
     return {"version": PLAN_VERSION, "mode": mode, "seed": seed,
-            "operations": sorted(set(operations)), "probability": float(probability),
+            "operations": selected_operations, "probability": float(probability),
             "faults": faults}

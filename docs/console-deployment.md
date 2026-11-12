@@ -92,7 +92,7 @@ docker compose --env-file .env.mocker -f docker-compose.mocker.yml down
 
 控制台预置 `good@example.test` 与 `bad@example.test` 合成记录；成功场景凭据为 `GoodPassword!`，`bad@example.test` 的导入密码故意与 mock 服务密码不符，用于登录失败场景。也可在账号页导入其他 `@example.test` 记录。
 
-在导航的「Mocker 测试」页选择预设场景，或选择随机模式并填写 seed、操作范围及 0 到 1 的故障概率。随机模式中的别名删除和改密仍需在任务页单独启用并确认。任务详情保留场景配置和实际计划，可复制 JSON；终态任务可按原计划重放。相同 seed、账号、操作范围和概率生成稳定计划，计划按账号、操作和序号定位故障。
+在导航的「Mocker 测试」页选择预设场景，或选择随机模式并填写 seed、操作范围及 0 到 1 的故障概率。预设场景还可模拟代理预检失败后切换、代理传输中断后重试及代理候选耗尽；随机操作可选择 `proxy_preflight` 和 `proxy_transport`。这些故障只注入合成候选的调度/本地 IMAP 连接流程，不会连接假代理或外部网络。随机模式中的别名删除和改密仍需在任务页单独启用并确认。任务详情保留场景配置和实际计划，可复制 JSON；终态任务可按原计划重放。相同 seed、账号、操作范围和概率生成稳定计划，计划按账号、操作、候选序号和操作序号定位故障。
 
 `worker_interrupted` 会让隔离 worker 进程异常退出，API 将任务标记为中断。`api_restart` 会让专用测试 API 在 worker 进入运行态后以退出码 70 退出；Compose 的 `restart: unless-stopped` 会重启 API，启动恢复将任务标记为中断，用户可刷新页面并创建后续任务。API 手动运行时，需由操作者重新启动进程。两种场景都不会自动重跑邮箱操作；已提交的改密候选会转为待核实。
 
